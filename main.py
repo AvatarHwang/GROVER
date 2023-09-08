@@ -8,7 +8,7 @@ from rdkit import RDLogger
 
 from grover.util.parsing import parse_args, get_newest_train_args
 from grover.util.utils import create_logger
-from task.cross_validate import cross_validate, cross_validate_for_data_parallel
+from task.cross_validate import cross_validate
 from task.fingerprint import generate_fingerprints
 from task.predict import make_predictions, write_prediction
 from task.pretrain import pretrain_model
