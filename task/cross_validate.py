@@ -15,7 +15,7 @@ import torch.distributed as dist
 from grover.util.utils import get_task_names
 from grover.util.utils import makedirs
 from task.run_evaluation import run_evaluation
-from task.train import run_training, run_data_parallel_training, run_task_parallel_training
+from task.train import run_training, run_data_parallel_training, run_task_parallel_training, run_pp_training
 
 
 def cross_validate(args: Namespace, logger: Logger = None) -> Tuple[float, float]:
@@ -44,6 +44,8 @@ def cross_validate(args: Namespace, logger: Logger = None) -> Tuple[float, float
                 model_scores = run_task_parallel_training(args, time_start, logger)
             elif args.data_parallel:
                 model_scores = run_data_parallel_training(args, time_start, logger)
+            elif args.pipeline_parallel:
+                model_scores = run_pp_training(args, time_start, logger)
             else:
                 model_scores = run_training(args, time_start, logger)
         else:

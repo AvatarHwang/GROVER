@@ -75,7 +75,7 @@ def train(epoch, model, data, loss_func, optimizer, scheduler,
 
     mol_collator = MolCollator(shared_dict=shared_dict, args=args)
 
-    num_workers = 2
+    num_workers = 4
     if type(data) == DataLoader:
         mol_loader = data
     else:
@@ -193,7 +193,7 @@ def run_training(args: Namespace, time_start, logger: Logger = None) -> List[flo
         train_data = DataLoader(train_data,
                                 batch_size=args.batch_size,
                                 shuffle=shuffle,
-                                num_workers=2,
+                                num_workers = 4,
                                 collate_fn=mol_collator)
 
         # Run training
@@ -340,7 +340,6 @@ def run_training(args: Namespace, time_start, logger: Logger = None) -> List[flo
     return ensemble_scores
 
 
-
 def run_data_parallel_training(args: Namespace, time_start, logger: Logger = None) -> List[float]:
     """
     Trains a model and returns test scores on the model checkpoint with the highest validation score.
@@ -381,17 +380,14 @@ def run_data_parallel_training(args: Namespace, time_start, logger: Logger = Non
                 cur_model = 0
             else:
                 cur_model = model_idx
-            if world_rank==0:
-                debug(f'Loading model {cur_model} from {args.checkpoint_paths[cur_model]}')
+            debug(f'Loading model {cur_model} from {args.checkpoint_paths[cur_model]}')
             model = load_checkpoint(args.checkpoint_paths[cur_model], current_args=args, logger=logger)
         else:
-            if world_rank==0:
-                debug(f'Building model {model_idx}')
+            debug(f'Building model {model_idx}')
             model = build_model(model_idx=model_idx, args=args)
 
         if args.fine_tune_coff != 1 and args.checkpoint_paths is not None:
-            if world_rank==0:
-                debug("Fine tune fc layer with different lr")
+            debug("Fine tune fc layer with different lr")
             initialize_weights(model_idx=model_idx, model=model.ffn, distinct_init=args.distinct_init)
 
         # Get loss and metric functions
@@ -399,13 +395,11 @@ def run_data_parallel_training(args: Namespace, time_start, logger: Logger = Non
 
         optimizer = build_optimizer(model, args)
 
-        if world_rank==0:
-            debug(model)
-            debug(f'Number of parameters = {param_count(model):,}')
+        debug(model)
+        debug(f'Number of parameters = {param_count(model):,}')
 
         if args.cuda:
-            if world_rank==0:
-                debug('Moving model to cuda')
+            debug('Moving model to cuda')
             model = model.cuda()
 
         model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
@@ -423,7 +417,7 @@ def run_data_parallel_training(args: Namespace, time_start, logger: Logger = Non
         train_sampler=torch.utils.data.distributed.DistributedSampler(train_data, num_replicas=world_size, shuffle=False)
         train_data = DataLoader(train_data,
                                 batch_size=args.batch_size,
-                                num_workers=2,
+                                num_workers = 4,
                                 collate_fn=mol_collator,
                                 sampler=train_sampler)
 
@@ -470,22 +464,19 @@ def run_data_parallel_training(args: Namespace, time_start, logger: Logger = Non
             if isinstance(scheduler, ExponentialLR):
                 scheduler.step()
 
-            if rank==0:
-                if args.show_individual_scores:
-                    # Individual validation scores
-                    for task_name, val_score in zip(args.task_names, val_scores):
-                        if world_rank==0:
-                            debug(f'Validation {task_name} {args.metric} = {val_score:.6f}')
+            if args.show_individual_scores:
+                # Individual validation scores
+                for task_name, val_score in zip(args.task_names, val_scores):
+                    debug(f'Validation {task_name} {args.metric} = {val_score:.6f}')
             loss_measure.append(val_loss)
-            if world_rank==0:
-                print('Epoch: {:04d}'.format(epoch),
-                    'loss_train: {:.6f}'.format(train_loss),
-                    'loss_val: {:.6f}'.format(val_loss),
-                    f'{args.metric}_val: {avg_val_score:.4f}',
-                    # 'auc_val: {:.4f}'.format(avg_val_score),
-                    'cur_lr: {:.5f}'.format(scheduler.get_lr()[-1]),
-                    't_time: {:.4f}s'.format(t_time),
-                    'v_time: {:.4f}s'.format(v_time))
+            print('Epoch: {:04d}'.format(epoch),
+                'loss_train: {:.6f}'.format(train_loss),
+                'loss_val: {:.6f}'.format(val_loss),
+                f'{args.metric}_val: {avg_val_score:.4f}',
+                # 'auc_val: {:.4f}'.format(avg_val_score),
+                'cur_lr: {:.5f}'.format(scheduler.get_lr()[-1]),
+                't_time: {:.4f}s'.format(t_time),
+                'v_time: {:.4f}s'.format(v_time))
 
             if args.tensorboard:
                 writer.add_scalar('loss/train', train_loss, epoch)
@@ -513,11 +504,9 @@ def run_data_parallel_training(args: Namespace, time_start, logger: Logger = Non
 
         # Evaluate on test set using model with best validation score
         if args.select_by_loss:
-            if world_rank==0:
-                info(f'Model {model_idx} best val loss = {min_val_loss:.6f} on epoch {best_epoch}')
+            info(f'Model {model_idx} best val loss = {min_val_loss:.6f} on epoch {best_epoch}')
         else:
-            if world_rank==0:
-                info(f'Model {model_idx} best validation {args.metric} = {best_score:.6f} on epoch {best_epoch}')
+            info(f'Model {model_idx} best validation {args.metric} = {best_score:.6f} on epoch {best_epoch}')
         dist.barrier()
         if rank==0:
             model = load_checkpoint(os.path.join(save_dir, 'model.pt'), cuda=args.cuda, logger=logger)
@@ -547,14 +536,12 @@ def run_data_parallel_training(args: Namespace, time_start, logger: Logger = Non
 
         # Average test score
         avg_test_score = np.nanmean(test_scores)
-        if rank==0:
-            info(f'Model {model_idx} test {args.metric} = {avg_test_score:.6f}')
+        info(f'Model {model_idx} test {args.metric} = {avg_test_score:.6f}')
 
         if args.show_individual_scores:
             # Individual test scores
             for task_name, test_score in zip(args.task_names, test_scores):
-                if world_rank==0:
-                    info(f'Model {model_idx} test {task_name} {args.metric} = {test_score:.6f}')
+                info(f'Model {model_idx} test {task_name} {args.metric} = {test_score:.6f}')
 
         # Evaluate ensemble on test set
         avg_test_preds = (sum_test_preds / args.ensemble_size).tolist()
@@ -577,15 +564,13 @@ def run_data_parallel_training(args: Namespace, time_start, logger: Logger = Non
 
         # Average ensemble score
         avg_ensemble_test_score = np.nanmean(ensemble_scores)
-        if rank==0:
-            info(f'Ensemble test {args.metric} = {avg_ensemble_test_score:.6f}')
+        info(f'Ensemble test {args.metric} = {avg_ensemble_test_score:.6f}')
 
         # Individual ensemble scores
-        if rank==0:
-            if args.show_individual_scores:
-                for task_name, ensemble_score in zip(args.task_names, ensemble_scores):
-                    info(f'Ensemble test {task_name} {args.metric} = {ensemble_score:.6f}')
-            print("training time:", training_time)
+        if args.show_individual_scores:
+            for task_name, ensemble_score in zip(args.task_names, ensemble_scores):
+                info(f'Ensemble test {task_name} {args.metric} = {ensemble_score:.6f}')
+        print("training time:", training_time)
 
         return ensemble_scores
 
@@ -620,7 +605,7 @@ def run_task_parallel_training(args: Namespace, time_start, logger: Logger = Non
     group_node = dist.new_group(group_node_ranks)
     group_edge = dist.new_group(group_edge_ranks) 
 
-    num_workers=2
+    num_workers = 4
 
     features_scaler, scaler, shared_dict, test_data, train_data, val_data = load_data(args, debug, logger)
 
@@ -694,7 +679,7 @@ def run_task_parallel_training(args: Namespace, time_start, logger: Logger = Non
                 train_data = DataLoader(train_data,
                                         batch_size=args.batch_size,
                                         shuffle=False,
-                                        num_workers=2,
+                                        num_workers = 4,
                                         worker_init_fn=seed_worker,
                                         generator=g,
                                         collate_fn=mol_collator,
@@ -802,7 +787,7 @@ def run_task_parallel_training(args: Namespace, time_start, logger: Logger = Non
                 train_sampler=torch.utils.data.distributed.DistributedSampler(train_data, rank=int(world_rank%(world_size/2)), num_replicas=int(world_size/2), shuffle=False)
                 train_data = DataLoader(train_data,
                                         batch_size=args.batch_size,
-                                        num_workers=2,
+                                        num_workers = 4,
                                         drop_last=True,
                                         sampler=train_sampler,
                                         collate_fn=mol_collator,
@@ -934,7 +919,7 @@ def run_task_parallel_training(args: Namespace, time_start, logger: Logger = Non
             model_1.eval()
             model_3.eval()
             val_mol_collator = MolCollator(args=args, shared_dict=shared_dict)
-            num_workers = 2
+            num_workers = 4
             val_mol_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=num_workers,worker_init_fn=seed_worker,
                                         generator=g, collate_fn=val_mol_collator)
             for _, item in enumerate(val_mol_loader):
@@ -949,9 +934,302 @@ def run_task_parallel_training(args: Namespace, time_start, logger: Logger = Non
                     preds = model_3(atom_output, bond_output, f_atoms, a2b, a_scope, features_batch2)
             #
 
+
+def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[float]:
+    from ParallelModelVersion2 import Encoder_for_PP as Encoder
+    from ParallelModelVersion2 import FFN
+
+    local_rank = int(os.environ['LOCAL_RANK'])
+    world_rank = int(os.environ['RANK'])
+    torch.cuda.set_device(local_rank)
+
+    if logger is not None:
+        debug, info = logger.debug, logger.info
+    else:
+        debug = info = print
+
+    world_size = args.world_size
+    if world_size > 4:
+        my_dp_group = [i for i in range(args.node_rank*4, args.node_rank*4+4)] 
+        my_dp_group = dist.new_group(my_dp_group)
+
+    num_workers = 4
+
+    features_scaler, scaler, shared_dict, test_data, train_data, val_data = load_data(args, debug, logger)
+
+    metric_func = get_metric_func(metric=args.metric)
+
+    # Set up test set evaluation
+    test_smiles, test_targets = test_data.smiles(), test_data.targets()
+    sum_test_preds = np.zeros((len(test_smiles), args.num_tasks))
+
+    # Train ensemble of models
+    for model_idx in range(args.ensemble_size):
+        # Tensorboard writer
+        save_dir = os.path.join(args.save_dir, f'model_{model_idx}')
+        makedirs(save_dir)
+
+        # Load/build model
+        if args.checkpoint_paths is not None:
+            if len(args.checkpoint_paths) == 1:
+                cur_model = 0
+            else:
+                cur_model = model_idx
+            debug(f'Loading model {cur_model} from {args.checkpoint_paths[cur_model]}')
+            model = load_checkpoint(args.checkpoint_paths[cur_model], current_args=args, logger=logger)
+        else:
+            debug(f'Building model {model_idx}')
+            model = build_model(model_idx=model_idx, args=args)
+
+        if args.fine_tune_coff != 1 and args.checkpoint_paths is not None:
+            debug("Fine tune fc layer with different lr")
+            initialize_weights(model_idx=model_idx, model=model.ffn, distinct_init=args.distinct_init)
+
+        # Get loss and metric functions
+        loss_func = get_loss_func(args, model)
+
+        training_time = []
+        model_0 = Encoder(model=model, node_rank=args.node_rank, num_layer=1).cuda()
+        if args.node_rank == 3:
+            model_2 = FFN(model=model, rank=local_rank, args=args).cuda()
+        else:
+            model_2 = None
+
+        if world_size > 4:
+            model_0 = DDP(model_0, process_group=my_dp_group)
+            if model_2 is not None:
+                model_2 = DDP(model_2, process_group=my_dp_group, find_unused_parameters=True)
+
+        optimizer_0 = build_optimizer(model_0, args)
+        if args.node_rank == 3:
+            optimizer_2 = build_optimizer(model_2, args)
+        else:
+            optimizer_2 = None
+
+        # Ensure that model is saved in correct location for evaluation if 0 epochs
+        if world_rank==0:
+            torch.save(model_0.state_dict(), os.path.join(save_dir, "model0.pt"))
+        if world_rank == 12:
+            torch.save(model_2.state_dict(), os.path.join(save_dir, "model2.pt"))
+
+        # Learning rate schedulers
+        scheduler_0 = build_lr_scheduler(optimizer_0, args)
+        if args.node_rank == 3:
+            scheduler_2 = build_lr_scheduler(optimizer_2, args)
+        else:
+            scheduler_2 = None
+        # Bulid data_loader
+        shuffle = True
+        mol_collator = MolCollator(shared_dict={}, args=args)
+        print("train data size: ", len(train_data))
+
+        if world_size>4:
+            train_sampler=torch.utils.data.distributed.DistributedSampler(train_data, num_replicas=4, rank=local_rank, shuffle=False)
+            train_data = DataLoader(train_data,
+                                    batch_size=args.batch_size,
+                                    num_workers=num_workers,
+                                    drop_last=True,
+                                    sampler=train_sampler,
+                                    collate_fn=mol_collator,
+                                    pin_memory=True)
+        else:
+            train_data = DataLoader(train_data,
+                                    batch_size=args.batch_size,
+                                    shuffle=False,
+                                    num_workers = 4,
+                                    worker_init_fn=seed_worker,
+                                    generator=g,
+                                    collate_fn=mol_collator,
+                                    pin_memory=True)
+
+        # Run training
+        best_score = float('inf') if args.minimize_score else -float('inf')
+        best_epoch, n_iter = 0, 0
+        min_val_loss = float('inf')
+        for epoch in range(args.epochs):
+            s_time = time.time()
+            n_iter, train_loss = train_pp(
+            epoch=epoch,
+            Encoder=model_0,
+            FFN=model_2, 
+            data=train_data, 
+            loss_func=loss_func, 
+            optimizer_0=optimizer_0, 
+            optimizer_1=optimizer_2, 
+            scheduler_0=scheduler_0, 
+            scheduler_1=scheduler_2, 
+            shared_dict=shared_dict, 
+            args=args, 
+            n_iter = n_iter, 
+            logger = logger,
+            num_workers=num_workers)
+            t_time = time.time() - s_time
+            training_time.append(t_time)
+            # s_time = time.time()
+            # val_scores, val_loss = task_parallel_evaluate(model_0=model_0,
+            #                                 model_2=model_2,
+            #                                 data=val_data,
+            #                                 loss_func=loss_func,
+            #                                 num_tasks=args.num_tasks,
+            #                                 metric_func=metric_func,
+            #                                 batch_size=args.batch_size,
+            #                                 dataset_type=args.dataset_type,
+            #                                 scaler=scaler,
+            #                                 shared_dict=shared_dict,
+            #                                 logger=logger,
+            #                                 args=args
+            #                                 )
+            # v_time = time.time() - s_time
+            # Average validation score
+            # avg_val_score = np.nanmean(val_scores)
+            # Logged after lr step
+            if isinstance(scheduler_0, ExponentialLR):
+                scheduler_0.step()
+            if isinstance(scheduler_2, ExponentialLR):
+                scheduler_2.step()
+
+            if args.show_individual_scores:
+                # Individual validation scores
+                for task_name, val_score in zip(args.task_names, val_scores):
+                    debug(f'Validation {task_name} {args.metric} = {val_score:.6f}')
+            if local_rank==0:
+                print('Epoch: {:04d}'.format(epoch),
+                    'loss_train: {:.6f}'.format(train_loss),
+                    'loss_val: {:.6f}'.format(val_loss),
+                    f'{args.metric}_val: {avg_val_score:.4f}',
+                    # 'auc_val: {:.4f}'.format(avg_val_score),
+                    'cur_lr_0: {:.5f}'.format(scheduler_0.get_lr()[-1]),
+                    'cur_lr_2: {:.5f}'.format(scheduler_2.get_lr()[-1]),
+                    't_time: {:.4f}s'.format(t_time),
+                    'v_time: {:.4f}s'.format(v_time))
+
+            if args.tensorboard:
+                writer.add_scalar('loss/train', train_loss, epoch)
+                writer.add_scalar('loss/val', val_loss, epoch)
+                writer.add_scalar(f'{args.metric}_val', avg_val_score, epoch)
+
+        # Save model checkpoint if improved validation score
+        if local_rank==0:
+            if args.select_by_loss:
+                if val_loss < min_val_loss:
+                    min_val_loss, best_epoch = val_loss, epoch
+                    save_checkpoint(os.path.join(save_dir, 'model.pt'), model, scaler, features_scaler, args)
+            else:
+                if args.minimize_score and avg_val_score < best_score or \
+                        not args.minimize_score and avg_val_score > best_score:
+                    best_score, best_epoch = avg_val_score, epoch
+                    save_checkpoint(os.path.join(save_dir, 'model.pt'), model, scaler, features_scaler, args)
+
+        if epoch - best_epoch > args.early_stop_epoch:
+                break
+
+        if world_rank==0:
+            ensemble_scores = 0.0
+
+            # Evaluate on test set using model with best validation score
+            if args.select_by_loss:
+                info(f'Model best val loss = {min_val_loss:.6f} on epoch {best_epoch}')
+            else:
+                info(f'Model best validation {args.metric} = {best_score:.6f} on epoch {best_epoch}')
+            model_0.load_state_dict(torch.load(os.path.join(save_dir, "model0.pt")))
+            model_2.load_state_dict(torch.load(os.path.join(save_dir, "model2.pt")))
+
+            # Send best epoch to rank 1
+            
+            test_preds, _ = task_parallel_predict(
+                model_0=model_0,
+                model_2=model_2,
+                data=test_data,
+                loss_func=loss_func,
+                batch_size=args.batch_size,
+                logger=logger,
+                shared_dict=shared_dict,
+                scaler=scaler,
+                args=args
+            )
+
+            test_scores = evaluate_predictions(
+                preds=test_preds,
+                targets=test_targets,
+                num_tasks=args.num_tasks,
+                metric_func=metric_func,
+                dataset_type=args.dataset_type,
+                logger=logger
+            )
+
+            if len(test_preds) != 0:
+                sum_test_preds += np.array(test_preds, dtype=float)
+
+            # Average test score
+            avg_test_score = np.nanmean(test_scores)
+            print(f"test scores:{test_scores}")
+            info(f'Model test {args.metric} = {avg_test_score:.6f}')
+
+            if args.show_individual_scores:
+                # Individual test scores
+                for task_name, test_score in zip(args.task_names, test_scores):
+                    info(f'Model test {task_name} {args.metric} = {test_score:.6f}')
+
+            # Evaluate ensemble on test set
+            avg_test_preds = (sum_test_preds / args.ensemble_size).tolist()
+
+            ensemble_scores = evaluate_predictions(
+                preds=avg_test_preds,
+                targets=test_targets,
+                num_tasks=args.num_tasks,
+                metric_func=metric_func,
+                dataset_type=args.dataset_type,
+                logger=logger
+            )
+
+            ind = [['preds'] * args.num_tasks + ['targets'] * args.num_tasks, args.task_names * 2]
+            ind = pd.MultiIndex.from_tuples(list(zip(*ind)))
+            data = np.concatenate([np.array(avg_test_preds), np.array(test_targets)], 1)
+            test_result = pd.DataFrame(data, index=test_smiles, columns=ind)
+            test_result.to_csv(os.path.join(args.save_dir, 'test_result.csv'))
+
+            # Average ensemble score
+            avg_ensemble_test_score = np.nanmean(ensemble_scores)
+            info(f'Ensemble test {args.metric} = {avg_ensemble_test_score:.6f}')
+
+            # Individual ensemble scores
+            if args.show_individual_scores:
+                for task_name, ensemble_score in zip(args.task_names, ensemble_scores):
+                    info(f'Ensemble test {task_name} {args.metric} = {ensemble_score:.6f}')
+            print(f"ensemble_scores : {ensemble_scores}")
+
+            #Delete: for measurement
+            print(f"\ntraining time is:{training_time}")
+            #print(f"\nloss_measure time is:{loss_measure}")
+
+            return ensemble_scores
+
+        if world_rank==int(dist.get_world_size()/2):
+            # Load the best model
+            model_1.load_state_dict(torch.load(os.path.join(save_dir, "model1.pt")))
+            model_3.load_state_dict(torch.load(os.path.join(save_dir, "model3.pt")))
+
+            model_1.eval()
+            model_3.eval()
+            val_mol_collator = MolCollator(args=args, shared_dict=shared_dict)
+            num_workers = 4
+            val_mol_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=num_workers,worker_init_fn=seed_worker,
+                                        generator=g, collate_fn=val_mol_collator)
+            for _, item in enumerate(val_mol_loader):
+                _, batch, features_batch2, mask, targets = item
+
+                with torch.no_grad():
+                    f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a = batch
+                    bond_output = model_1(f_atoms.cuda(), f_bonds.cuda(), a2b.cuda(), b2a.cuda(), b2revb.cuda(), a_scope.cuda(), b_scope.cuda(), a2a.cuda(), features_batch2)
+
+                    atom_output = torch.zeros(f_atoms.size(0), args.hidden_size).cuda() # elements will be changed in forward
+
+                    preds = model_3(atom_output, bond_output, f_atoms, a2b, a_scope, features_batch2)
+
+
 def task_parallel_train(epoch, model_0, model_2, data, loss_func, optimizer_0, optimizer_2, scheduler_0,
           scheduler_2, shared_dict, args, n_iter = 0,
-          logger = None, num_workers=2):
+          logger = None, num_workers = 4):
 
     model_0.train()
     model_2.train()
@@ -1047,7 +1325,7 @@ def task_parallel_evaluate(model_0,
     # num_iters, iter_step = len(data), batch_size
     loss_sum, iter_count = 0, 0
     mol_collator = MolCollator(args=args, shared_dict=shared_dict)
-    num_workers = 2
+    num_workers = 4
     mol_loader = DataLoader(data, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, worker_init_fn=seed_worker,
                                 generator=g, collate_fn=mol_collator)
     for _, item in enumerate(mol_loader):
@@ -1123,7 +1401,7 @@ def task_parallel_predict(model_0,
     mol_collator = MolCollator(args=args, shared_dict=shared_dict)
     # mol_dataset = MoleculeDataset(data)
 
-    num_workers = 2
+    num_workers = 4
     mol_loader = DataLoader(data, batch_size=batch_size, shuffle=False, num_workers=num_workers,worker_init_fn=seed_worker,
                             generator=g, collate_fn=mol_collator)
     for _, item in enumerate(mol_loader):
@@ -1160,7 +1438,7 @@ def task_parallel_predict(model_0,
 
 def train_rank1(epoch, model_1, model_3, data, loss_func, optimizer_0, optimizer_2, scheduler_0,
           scheduler_2, shared_dict, args, n_iter = 0,
-          logger = None, num_workers=2):
+          logger = None, num_workers = 4):
 
     rank = int(os.environ['RANK'])
     
@@ -1251,7 +1529,7 @@ def evaluate_rank1(model_1,
     preds = []
     loss_sum, iter_count = 0, 0
     val_mol_collator = MolCollator(args=args, shared_dict=shared_dict)
-    val_mol_loader = DataLoader(data, batch_size=args.batch_size, shuffle=False, num_workers=2,worker_init_fn=seed_worker,
+    val_mol_loader = DataLoader(data, batch_size=args.batch_size, shuffle=False, num_workers = 4,worker_init_fn=seed_worker,
                         generator=g, collate_fn=val_mol_collator)
     for _, item in enumerate(val_mol_loader):
         _, batch, features_batch2, mask, targets = item
@@ -1401,3 +1679,190 @@ def save_splits(args, test_data, train_data, val_data):
     with open(os.path.join(args.save_dir, 'split_indices.pckl'), 'wb') as f:
         pickle.dump(all_split_indices, f)
     return writer
+
+
+def train_pp(epoch, Encoder, FFN, data, loss_func, optimizer_0, optimizer_1, scheduler_0, 
+            scheduler_1, shared_dict, args, n_iter=0, logger=None, num_workers=4):
+
+    Encoder.train()
+    if FFN:
+        FFN.train()
+
+    loss_sum, iter_count = 0, 0
+    cum_loss_sum, cum_iter_count = 0, 0
+
+    mol_collator = MolCollator(shared_dict=shared_dict, args=args)
+
+    #num_workers = 4
+    if type(data) == DataLoader:
+        mol_loader = data
+    else:
+        mol_loader = DataLoader(data, batch_size=args.batch_size, shuffle=False,
+                            num_workers=num_workers, collate_fn=mol_collator, pin_memory=True)
+
+    for _, item in enumerate(mol_loader):
+        with nvtx.annotate(f"rank {dist.get_rank()} step {n_iter/args.batch_size}"):
+            step_time = time.time()
+
+            with nvtx.annotate(f"zerograd even {n_iter/args.batch_size}", color="red"):
+                for model in [Encoder, FFN]:
+                    if model is not None:
+                        model.zero_grad()
+            
+            forward_only = False
+            loss = forward_backward_step(Encoder, FFN, item, args, forward_only)
+            
+            loss_sum += loss.item()
+            iter_count += args.batch_size
+
+            cum_loss_sum += loss.item()
+            cum_iter_count += 1
+
+            with nvtx.annotate(f"optim even {n_iter/args.batch_size}", color="blue"):
+                optimizer_2.step()
+                if isinstance(scheduler_2, NoamLR):
+                    scheduler_2.step()
+                optimizer_0.step()
+                if isinstance(scheduler_0, NoamLR):
+                    scheduler_0.step()
+
+            n_iter += args.batch_size
+
+    return n_iter, (cum_loss_sum / cum_iter_count)
+
+
+def forward_backward_step(Encoder, FFN, item, args, forward_only):
+    
+    _, batch, features_batch, mask, targets = item
+
+    micro_batches = [batch[i:i+args.micro_batch_size] for i in range(0, len(batch), args.micro_batch_size)]
+
+    #disable_grad_sync()
+    num_micro_batch = args.num_micro_batch
+    model_parallel_size = args.model_parallel_size
+    num_warmup_microbatches = min(model_parallel_size - args.node_rank, num_micro_batch)
+    num_microbatches_remaining = num_micro_batch - num_warmup_microbatches
+
+    world_rank = dist.get_rank()
+
+    input_tensors, output_tensors = (None, None), (None, None)
+    if not forward_only:
+        input_tensors, output_tensors = [], []
+    preds = []
+
+    # Warmup forward passes
+    for i in range(num_warmup_microbatches):
+        f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a = micro_batches[i]
+        # Recv forward
+        if arga.node_rank != 0:
+            f_atoms = dist.recv(tensor=f_atoms.cuda(), src=world_rank-args.data_parallel_size)
+            f_bonds = dist.recv(tensor=f_bonds.cuda(), src=world_rank-args.data_parallel_size)
+        input_tensor = (f_atoms, f_bonds)
+        
+        # Forward Step
+        atom_output, bond_output = Encoder(f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a, features_batch)
+        output_tensor=(atom_output, bond_output)
+        if FFN:
+            pred = FFN(atom_output, bond_output, f_atoms, f_bonds, a2a, a_scope, features_batch)
+            preds.append(pred)
+        # Send FW
+        if args.node_rank != args.model_parallel_size - 1:
+            dist.isend(tensor=atom_output, dst=world_rank+args.data_parallel_size)
+            dist.isend(tensor=bond_output, dst=world_rank+args.data_parallel_size)
+
+        if not forward_only:
+            input_tensors.append(input_tensor)
+            output_tensors.append(output_tensor)
+
+    # 1F1B
+    if num_microbatches_remaining > 0:
+        # recv forward
+        f_atoms = dist.recv(tensor=f_atoms.cuda(), src=world_rank-args.data_parallel_size)
+        f_bonds = dist.recv(tensor=f_bonds.cuda(), src=world_rank-args.data_parallel_size)
+
+    for i in range(num_microbatches_remaining):
+        _, _, a2b, b2a, b2revb, a_scope, b_scope, a2a = micro_batches[i]
+        last_iteration = i == (num_microbatches_remaining - 1)
+        # Forward Step
+        atom_output, bond_output = Encoder(f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a, features_batch)
+        if FFN:
+            pred = FFN(atom_output, bond_output, f_atoms, f_bonds, a2a, a_scope, features_batch)
+            preds.append(pred)
+
+        if forward_only:
+            # Send FW
+            if args.node_rank != args.model_parallel_size - 1:
+                dist.isend(tensor=atom_output, dst=world_rank+args.data_parallel_size)
+                dist.isend(tensor=bond_output, dst=world_rank+args.data_parallel_size)
+            if not last_iteration:
+                # Recv forward
+                f_atoms = dist.recv(tensor=f_atoms.cuda(), src=world_rank-args.data_parallel_size)
+                f_bonds = dist.recv(tensor=f_bonds.cuda(), src=world_rank-args.data_parallel_size)
+        else:
+            # Send FW recv BW
+            if args.node_rank != args.model_parallel_size - 1:
+                dist.isend(tensor=atom_output, dst=world_rank+args.data_parallel_size)
+                dist.isend(tensor=bond_output, dst=world_rank+args.data_parallel_size)
+                atom_output_grad, bond_output_grad = torch.zeros_like(atom_output), torch.zeros_like(bond_output)
+                atom_output_grad = dist.recv(tensor=atom_output_grad.cuda(), src=world_rank+args.data_parallel_size)
+                bond_output_grad = dist.recv(tensor=bond_output_grad.cuda(), src=world_rank+args.data_parallel_size)
+                output_tensor_grads = (atom_output_grad, bond_output_grad)
+                input_tensors.append(input_tensor)
+                output_tensors.append(output_tensor)
+
+                input_tensor = input_tensors.pop(0)
+                output_tensor = output_tensors.pop(0)
+
+                # Backward Step
+                atom_output.backward(atom_output_grad)
+                bond_output.backward(bond_output_grad)
+
+            else:
+                pred.backward()
+
+            if last_iteration:
+                input_tensor = (None, None)
+                # send backward
+                dist.isend(tensor=atom_output.grad, dst=world_rank-args.data_parallel_size)
+                dist.isend(tensor=bond_output.grad, dst=world_rank-args.data_parallel_size)
+            else:
+                # Send backward
+                dist.isend(tensor=atom_output.grad, dst=world_rank-args.data_parallel_size)
+                dist.isend(tensor=bond_output.grad, dst=world_rank-args.data_parallel_size)
+                # Recv forward
+                f_atoms = dist.recv(tensor=f_atoms.cuda(), src=world_rank-args.data_parallel_size)
+                f_bonds = dist.recv(tensor=f_bonds.cuda(), src=world_rank-args.data_parallel_size)
+    
+    # cooldown phase
+    if not forward_only:
+        for i in range(num_warmup_microbatches):
+            _, _, a2b, b2a, b2revb, a_scope, b_scope, a2a = micro_batches[i]
+            if i == num_warmup_microbatches - 1:
+                if node_rank == 0:
+                    #enable_grad_sync()
+                    pass
+                input_tensor = input_tensors.pop(0)
+                output_tensor = output_tensors.pop(0)
+                
+                if args.node_rank != args.model_parallel_size - 1:
+                    # recv backward
+                    atom_output_grad = dist.recv(tensor=atom_output_grad.cuda(), src=world_rank+args.data_parallel_size)
+                    bond_output_grad = dist.recv(tensor=bond_output_grad.cuda(), src=world_rank+args.data_parallel_size)
+                    # Backward Step
+                    atom_output.backward(atom_output_grad)
+                    bond_output.backward(bond_output_grad)
+                else:
+                    pred.backward()
+                if args.node_rank != 0:
+                    # send backward
+                    dist.isend(tensor=atom_output.grad, dst=world_rank-args.data_parallel_size)
+                    dist.isend(tensor=bond_output.grad, dst=world_rank-args.data_parallel_size)
+    # calculate loss
+    if not forward_only:
+        preds = torch.stack(preds)
+        loss = loss_func(preds, targets) * class_weights * mask
+        loss = loss.sum() / mask.sum()
+    else:
+        loss = None
+                
+    return loss

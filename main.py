@@ -23,7 +23,7 @@ def setup(seed, args):
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
 
-    if args.data_parallel or args.task_parallel:
+    if args.data_parallel or args.task_parallel or args.pipeline_parallel:
         world_rank = int(os.environ['RANK'])
         dist.init_process_group(backend='nccl', world_size=args.world_size, rank=world_rank)
 
