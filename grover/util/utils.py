@@ -20,6 +20,7 @@ from tqdm import tqdm as core_tqdm
 
 from grover.data import MoleculeDatapoint, MoleculeDataset, StandardScaler
 from grover.model.models import GroverFpGeneration, GroverFinetuneTask
+from ParallelModelVersion2 import GroverFinetuneTask_for_PP
 from grover.util.nn_utils import initialize_weights
 from grover.util.scheduler import NoamLR
 
@@ -792,6 +793,9 @@ def build_model(args: Namespace, model_idx=0):
         model = GroverFpGeneration(args)
     else:
         # finetune and evaluation case.
-        model = GroverFinetuneTask(args)
+        if args.pipeline_parallel:
+            model = GroverFinetuneTask_for_PP(args)
+        else:
+            model = GroverFinetuneTask(args)
     initialize_weights(model=model, model_idx=model_idx)
     return model

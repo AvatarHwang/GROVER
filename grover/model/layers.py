@@ -552,10 +552,10 @@ class MTBlock(nn.Module):
         self.input_dim = input_dim
         self.cuda = cuda
         self.res_connection = res_connection
-        self.act_func = get_activation_function(activation)
+        self.act_func = get_activation_function(activation).cuda()
         self.dropout_layer = nn.Dropout(p=dropout)
         # Note: elementwise_affine has to be consistent with the pre-training phase
-        self.layernorm = nn.LayerNorm(self.hidden_size, elementwise_affine=True)
+        self.layernorm = nn.LayerNorm(self.hidden_size, elementwise_affine=True).cuda()
 
         self.W_i = nn.Linear(self.input_dim, self.hidden_size, bias=bias)
         self.attn = MultiHeadedAttention(h=num_attn_head,
@@ -581,7 +581,7 @@ class MTBlock(nn.Module):
             if f_atoms.shape[1] != self.hidden_size:
                 self.W_i = self.W_i.cuda()
                 f_atoms = self.W_i(f_atoms.cuda())
-                f_atoms = self.dropout_layer(self.layernorm(self.act_func(f_atoms)))
+                f_atoms = self.dropout_layer(self.layernorm(self.act_func(f_atoms.cuda())))
 
         else:  # bond messages
             if f_bonds.shape[1] != self.hidden_size:

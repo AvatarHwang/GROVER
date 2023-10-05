@@ -29,6 +29,8 @@ from grover.util.utils import build_optimizer, build_lr_scheduler, makedirs, loa
 from grover.util.utils import get_class_sizes, get_data, split_data, get_task_names
 from task.predict import predict, evaluate, evaluate_predictions
 
+import copy
+
 import nvtx
 
 import random
@@ -936,8 +938,6 @@ def run_task_parallel_training(args: Namespace, time_start, logger: Logger = Non
 
 
 def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[float]:
-    from ParallelModelVersion2 import Encoder_for_PP as Encoder
-    from ParallelModelVersion2 import FFN
 
     local_rank = int(os.environ['LOCAL_RANK'])
     world_rank = int(os.environ['RANK'])
@@ -985,40 +985,24 @@ def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[
             debug("Fine tune fc layer with different lr")
             initialize_weights(model_idx=model_idx, model=model.ffn, distinct_init=args.distinct_init)
 
+        model = model.cuda()
         # Get loss and metric functions
         loss_func = get_loss_func(args, model)
 
         training_time = []
-        model_0 = Encoder(model=model, node_rank=args.node_rank, num_layer=1).cuda()
-        if args.node_rank == 3:
-            model_2 = FFN(model=model, rank=local_rank, args=args).cuda()
-        else:
-            model_2 = None
 
         if world_size > 4:
-            model_0 = DDP(model_0, process_group=my_dp_group)
-            if model_2 is not None:
-                model_2 = DDP(model_2, process_group=my_dp_group, find_unused_parameters=True)
+            model = DDP(model, process_group=my_dp_group, find_unused_parameters=True)
 
-        optimizer_0 = build_optimizer(model_0, args)
-        if args.node_rank == 3:
-            optimizer_2 = build_optimizer(model_2, args)
-        else:
-            optimizer_2 = None
+        optimizer = build_optimizer(model, args)
 
         # Ensure that model is saved in correct location for evaluation if 0 epochs
-        if world_rank==0:
-            torch.save(model_0.state_dict(), os.path.join(save_dir, "model0.pt"))
-        if world_rank == 12:
-            torch.save(model_2.state_dict(), os.path.join(save_dir, "model2.pt"))
+        if local_rank==0:
+            torch.save(model.state_dict(), os.path.join(save_dir, f"model_{args.node_rank}.pt"))
 
         # Learning rate schedulers
-        scheduler_0 = build_lr_scheduler(optimizer_0, args)
-        if args.node_rank == 3:
-            scheduler_2 = build_lr_scheduler(optimizer_2, args)
-        else:
-            scheduler_2 = None
-        # Bulid data_loader
+        scheduler = build_lr_scheduler(optimizer, args)
+
         shuffle = True
         mol_collator = MolCollator(shared_dict={}, args=args)
         print("train data size: ", len(train_data))
@@ -1050,14 +1034,11 @@ def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[
             s_time = time.time()
             n_iter, train_loss = train_pp(
             epoch=epoch,
-            Encoder=model_0,
-            FFN=model_2, 
+            model=model,
             data=train_data, 
             loss_func=loss_func, 
-            optimizer_0=optimizer_0, 
-            optimizer_1=optimizer_2, 
-            scheduler_0=scheduler_0, 
-            scheduler_1=scheduler_2, 
+            optimizer=optimizer, 
+            scheduler=scheduler, 
             shared_dict=shared_dict, 
             args=args, 
             n_iter = n_iter, 
@@ -1065,28 +1046,26 @@ def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[
             num_workers=num_workers)
             t_time = time.time() - s_time
             training_time.append(t_time)
-            # s_time = time.time()
-            # val_scores, val_loss = task_parallel_evaluate(model_0=model_0,
-            #                                 model_2=model_2,
-            #                                 data=val_data,
-            #                                 loss_func=loss_func,
-            #                                 num_tasks=args.num_tasks,
-            #                                 metric_func=metric_func,
-            #                                 batch_size=args.batch_size,
-            #                                 dataset_type=args.dataset_type,
-            #                                 scaler=scaler,
-            #                                 shared_dict=shared_dict,
-            #                                 logger=logger,
-            #                                 args=args
-            #                                 )
-            # v_time = time.time() - s_time
+            s_time = time.time()
+            val_scores, val_loss = evaluate(
+                model=model,
+                data=val_data,
+                loss_func=loss_func,
+                num_tasks=args.num_tasks,
+                metric_func=metric_func,
+                batch_size=args.batch_size,
+                dataset_type=args.dataset_type,
+                scaler=scaler,
+                shared_dict=shared_dict,
+                logger=logger,
+                args=args
+            )
+            v_time = time.time() - s_time
             # Average validation score
-            # avg_val_score = np.nanmean(val_scores)
+            avg_val_score = np.nanmean(val_scores)
             # Logged after lr step
-            if isinstance(scheduler_0, ExponentialLR):
-                scheduler_0.step()
-            if isinstance(scheduler_2, ExponentialLR):
-                scheduler_2.step()
+            if isinstance(scheduler, ExponentialLR):
+                scheduler.step()
 
             if args.show_individual_scores:
                 # Individual validation scores
@@ -1131,8 +1110,7 @@ def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[
                 info(f'Model best val loss = {min_val_loss:.6f} on epoch {best_epoch}')
             else:
                 info(f'Model best validation {args.metric} = {best_score:.6f} on epoch {best_epoch}')
-            model_0.load_state_dict(torch.load(os.path.join(save_dir, "model0.pt")))
-            model_2.load_state_dict(torch.load(os.path.join(save_dir, "model2.pt")))
+            model.load_state_dict(torch.load(os.path.join(save_dir, "model.pt")))
 
             # Send best epoch to rank 1
             
@@ -1681,12 +1659,10 @@ def save_splits(args, test_data, train_data, val_data):
     return writer
 
 
-def train_pp(epoch, Encoder, FFN, data, loss_func, optimizer_0, optimizer_1, scheduler_0, 
-            scheduler_1, shared_dict, args, n_iter=0, logger=None, num_workers=4):
+def train_pp(epoch, model, data, loss_func, optimizer, scheduler, 
+            shared_dict, args, n_iter=0, logger=None, num_workers=4):
 
-    Encoder.train()
-    if FFN:
-        FFN.train()
+    model.train()
 
     loss_sum, iter_count = 0, 0
     cum_loss_sum, cum_iter_count = 0, 0
@@ -1700,168 +1676,265 @@ def train_pp(epoch, Encoder, FFN, data, loss_func, optimizer_0, optimizer_1, sch
         mol_loader = DataLoader(data, batch_size=args.batch_size, shuffle=False,
                             num_workers=num_workers, collate_fn=mol_collator, pin_memory=True)
 
+    iteration=-1
     for _, item in enumerate(mol_loader):
-        with nvtx.annotate(f"rank {dist.get_rank()} step {n_iter/args.batch_size}"):
-            step_time = time.time()
+        iteration+=1
+        if iteration%args.num_micro_batch==0:
+            micro_batches = []
+            micro_batches.append(item)
+            for i in range(1, args.num_micro_batch):
+                micro_batches.append(next(enumerate(mol_loader))[1])
 
-            with nvtx.annotate(f"zerograd even {n_iter/args.batch_size}", color="red"):
-                for model in [Encoder, FFN]:
-                    if model is not None:
-                        model.zero_grad()
-            
-            forward_only = False
-            loss = forward_backward_step(Encoder, FFN, item, args, forward_only)
-            
-            loss_sum += loss.item()
-            iter_count += args.batch_size
+            with nvtx.annotate(f"rank {dist.get_rank()} step {n_iter/args.batch_size}"):
+                step_time = time.time()
 
-            cum_loss_sum += loss.item()
-            cum_iter_count += 1
+                with nvtx.annotate(f"zerograd even {n_iter/args.batch_size}", color="red"):
+                    model.zero_grad()
+                
+                forward_only = False
+                loss = forward_backward_step(model, micro_batches, args, forward_only)
+                print("forward_backward_step done!")
+                if args.node_rank==3:
+                    loss_sum += loss.item()
+                    cum_loss_sum += loss.item()
+                iter_count += args.batch_size
+                cum_iter_count += 1
 
-            with nvtx.annotate(f"optim even {n_iter/args.batch_size}", color="blue"):
-                optimizer_2.step()
-                if isinstance(scheduler_2, NoamLR):
-                    scheduler_2.step()
-                optimizer_0.step()
-                if isinstance(scheduler_0, NoamLR):
-                    scheduler_0.step()
+                with nvtx.annotate(f"optim even {n_iter/args.batch_size}", color="blue"):
+                    optimizer.step()
+                    if isinstance(scheduler, NoamLR):
+                        scheduler.step()
 
-            n_iter += args.batch_size
+                n_iter += args.batch_size
+        else:
+            pass
 
     return n_iter, (cum_loss_sum / cum_iter_count)
 
 
-def forward_backward_step(Encoder, FFN, item, args, forward_only):
-    
-    _, batch, features_batch, mask, targets = item
+def forward_backward_step(model, micro_batches, args, forward_only):
 
-    micro_batches = [batch[i:i+args.micro_batch_size] for i in range(0, len(batch), args.micro_batch_size)]
-
+    loss_func = get_loss_func(args, model)
     #disable_grad_sync()
     num_micro_batch = args.num_micro_batch
     model_parallel_size = args.model_parallel_size
-    num_warmup_microbatches = min(model_parallel_size - args.node_rank, num_micro_batch)
+    num_warmup_microbatches = min(model_parallel_size - args.node_rank -1, num_micro_batch)
     num_microbatches_remaining = num_micro_batch - num_warmup_microbatches
 
     world_rank = dist.get_rank()
 
-    input_tensors, output_tensors = (None, None), (None, None)
+    input_tensors, output_tensors = [], []
     if not forward_only:
-        input_tensors, output_tensors = [], []
-    preds = []
+        input_batches, output_batches = [], []
+    losses = []
 
     # Warmup forward passes
+    # print(f"num_warmup_microbatches: {num_warmup_microbatches}")
     for i in range(num_warmup_microbatches):
-        f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a = micro_batches[i]
+        _, micro_batch = next(enumerate(micro_batches))
+        _, batch, features_batch, mask, targets = micro_batch
+        mask, targets = mask.cuda(), targets.cuda()
+        class_weights = torch.ones(targets.shape).cuda()
+        f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope, a2a = batch
         # Recv forward
-        if arga.node_rank != 0:
-            f_atoms = dist.recv(tensor=f_atoms.cuda(), src=world_rank-args.data_parallel_size)
-            f_bonds = dist.recv(tensor=f_bonds.cuda(), src=world_rank-args.data_parallel_size)
-        input_tensor = (f_atoms, f_bonds)
+        if args.node_rank != 0:
+            f_atoms_feature = torch.empty(f_atoms_original.size(0), args.hidden_size).cuda()
+            f_bonds_feature = torch.empty(f_bonds_original.size(0), args.hidden_size).cuda()
+            # print(f"recv fw: {f_atoms_feature.size()} at line 1974 to {world_rank-args.data_parallel_size}")
+            dist.recv(tensor=f_atoms_feature.cuda(), src=world_rank-args.data_parallel_size)
+            dist.recv(tensor=f_bonds_feature.cuda(), src=world_rank-args.data_parallel_size)
+            
+            f_atoms_feature.requires_grad = True
+            f_bonds_feature.requires_grad = True
+        else:
+            f_atoms_feature = None
+            f_bonds_feature = None
+        input_batch = (f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope, 
+                        a2a, f_atoms_feature, f_bonds_feature)
         
         # Forward Step
-        atom_output, bond_output = Encoder(f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a, features_batch)
-        output_tensor=(atom_output, bond_output)
-        if FFN:
-            pred = FFN(atom_output, bond_output, f_atoms, f_bonds, a2a, a_scope, features_batch)
-            preds.append(pred)
+        output_batch = model(input_batch, features_batch)
+        if args.node_rank==3:
+            atom_output, bond_output = output_batch
+        else:
+            atom_output, bond_output, _, _, _, _, _, _, _, _ = output_batch
         # Send FW
         if args.node_rank != args.model_parallel_size - 1:
-            dist.isend(tensor=atom_output, dst=world_rank+args.data_parallel_size)
-            dist.isend(tensor=bond_output, dst=world_rank+args.data_parallel_size)
+            # print(f"send fw: {atom_output.size()} at line 1993 to {world_rank+args.data_parallel_size}")
+            dist.send(tensor=atom_output.cuda(), dst=world_rank + args.data_parallel_size)
+            dist.send(tensor=bond_output.cuda(), dst=world_rank + args.data_parallel_size)
+            
 
         if not forward_only:
-            input_tensors.append(input_tensor)
-            output_tensors.append(output_tensor)
+            input_batches.append(input_batch)
+            output_batches.append(output_batch)
 
-    # 1F1B
     if num_microbatches_remaining > 0:
         # recv forward
-        f_atoms = dist.recv(tensor=f_atoms.cuda(), src=world_rank-args.data_parallel_size)
-        f_bonds = dist.recv(tensor=f_bonds.cuda(), src=world_rank-args.data_parallel_size)
+        if args.node_rank != 0:
+            if args.node_rank == args.model_parallel_size - 1:
+                _, micro_batch = next(enumerate(micro_batches))
+                _, batch, _, _, _ = micro_batch
+                f_atoms_original, f_bonds_original,  _, _, _, _, _, _ = batch
+            f_atoms_feature = torch.empty(f_atoms_original.size(0), args.hidden_size).cuda()
+            f_bonds_feature = torch.empty(f_bonds_original.size(0), args.hidden_size).cuda()
+            # print(f"recv fw: {f_atoms_feature.size()} at line 2014 from {world_rank-args.data_parallel_size}")
+            dist.recv(tensor=f_atoms_feature, src=world_rank - args.data_parallel_size)
+            dist.recv(tensor=f_bonds_feature, src=world_rank - args.data_parallel_size)
+            
+            f_atoms_feature.requires_grad = True
+            f_bonds_feature.requires_grad = True
+        else:
+            f_atoms_feature = None
+            f_bonds_feature = None
 
+    # 1F1B
+    # print("\nStart 1F1B")
     for i in range(num_microbatches_remaining):
-        _, _, a2b, b2a, b2revb, a_scope, b_scope, a2a = micro_batches[i]
+        _, micro_batch = next(enumerate(micro_batches))
+        _, batch, features_batch, mask, targets = micro_batch
+        class_weights = torch.ones(targets.shape).cuda()
+        mask, targets = mask.cuda(), targets.cuda()
+        f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope, a2a = batch
+        input_batch = (f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope, a2a, f_atoms_feature, f_bonds_feature)
         last_iteration = i == (num_microbatches_remaining - 1)
+        # print(f"last_iteration: {last_iteration}")
         # Forward Step
-        atom_output, bond_output = Encoder(f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a, features_batch)
-        if FFN:
-            pred = FFN(atom_output, bond_output, f_atoms, f_bonds, a2a, a_scope, features_batch)
-            preds.append(pred)
+        output_batch = model(input_batch, features_batch)
+        if args.node_rank==3:
+            atom_output, bond_output = output_batch
+            pred = (atom_output + bond_output)/2
+            loss = loss_func(pred, targets.cuda()) * class_weights * mask
+            loss = loss.sum() / mask.sum()
+            losses.append(loss)
+        else:
+            atom_output, bond_output, _, _, _, _, _, _, _, _ = output_batch
 
         if forward_only:
             # Send FW
             if args.node_rank != args.model_parallel_size - 1:
-                dist.isend(tensor=atom_output, dst=world_rank+args.data_parallel_size)
-                dist.isend(tensor=bond_output, dst=world_rank+args.data_parallel_size)
+                dist.send(tensor=atom_output.cuda(), dst=world_rank+args.data_parallel_size)
+                dist.send(tensor=bond_output.cuda(), dst=world_rank+args.data_parallel_size)
             if not last_iteration:
                 # Recv forward
-                f_atoms = dist.recv(tensor=f_atoms.cuda(), src=world_rank-args.data_parallel_size)
-                f_bonds = dist.recv(tensor=f_bonds.cuda(), src=world_rank-args.data_parallel_size)
+                if args.node_rank != 0:
+                    f_atoms_feature = torch.empty(f_atoms_original.size(0), args.hidden_size).cuda()
+                    f_bonds_feature = torch.empty(f_bonds_original.size(0), args.hidden_size).cuda()
+                    f_atoms_feature.requires_grad = True
+                    f_bonds_feature.requires_grad = True
+                    dist.recv(tensor=f_atoms_feature.cuda(), src=world_rank-args.data_parallel_size)
+                    dist.recv(tensor=f_bonds_feature.cuda(), src=world_rank-args.data_parallel_size)
         else:
             # Send FW recv BW
             if args.node_rank != args.model_parallel_size - 1:
-                dist.isend(tensor=atom_output, dst=world_rank+args.data_parallel_size)
-                dist.isend(tensor=bond_output, dst=world_rank+args.data_parallel_size)
-                atom_output_grad, bond_output_grad = torch.zeros_like(atom_output), torch.zeros_like(bond_output)
-                atom_output_grad = dist.recv(tensor=atom_output_grad.cuda(), src=world_rank+args.data_parallel_size)
-                bond_output_grad = dist.recv(tensor=bond_output_grad.cuda(), src=world_rank+args.data_parallel_size)
-                output_tensor_grads = (atom_output_grad, bond_output_grad)
-                input_tensors.append(input_tensor)
-                output_tensors.append(output_tensor)
 
-                input_tensor = input_tensors.pop(0)
-                output_tensor = output_tensors.pop(0)
+                atom_output_grad, bond_output_grad = torch.zeros_like(atom_output), torch.zeros_like(bond_output)
+                # Recv BW
+                # print(f"recv bw: {atom_output_grad.size()} at line 2054 from {world_rank + args.data_parallel_size}")
+                dist.recv(tensor=atom_output_grad.cuda(), src=world_rank + args.data_parallel_size)
+                dist.recv(tensor=bond_output_grad.cuda(), src=world_rank + args.data_parallel_size)
+                
+                # Send FW
+                # print(f"send fw: {atom_output.size()} at line 2052 to {world_rank + args.data_parallel_size}")
+                dist.send(tensor=atom_output.cuda(), dst=world_rank + args.data_parallel_size)
+                dist.send(tensor=bond_output.cuda(), dst=world_rank + args.data_parallel_size)
+
+                output_batch = (f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope,a2a, f_atoms_feature, f_bonds_feature)
+                if f_atoms_feature is not None:
+                    f_atoms_feature.retain_grad()
+                    f_bonds_feature.retain_grad()
+                input_batches.append(input_batch)
+                output_batches.append(output_batch)
+
+                if input_batches != []:
+                    input_batch = input_batches.pop(0)
+                    output_batch = output_batches.pop(0)
 
                 # Backward Step
-                atom_output.backward(atom_output_grad)
-                bond_output.backward(bond_output_grad)
-
-            else:
-                pred.backward()
+                atom_output.backward(atom_output_grad, retain_graph=True)
+                bond_output.backward(bond_output_grad, retain_graph=True)
+            else: # if last rank
+                pred = (atom_output + bond_output)/2
+                f_atoms_feature.retain_grad()
+                f_bonds_feature.retain_grad()
+                loss = loss_func(pred, targets.cuda()) * class_weights * mask
+                loss = loss.sum() / mask.sum()
+                losses.append(loss)
+                loss.backward(retain_graph=True)
 
             if last_iteration:
-                input_tensor = (None, None)
-                # send backward
-                dist.isend(tensor=atom_output.grad, dst=world_rank-args.data_parallel_size)
-                dist.isend(tensor=bond_output.grad, dst=world_rank-args.data_parallel_size)
-            else:
-                # Send backward
-                dist.isend(tensor=atom_output.grad, dst=world_rank-args.data_parallel_size)
-                dist.isend(tensor=bond_output.grad, dst=world_rank-args.data_parallel_size)
-                # Recv forward
-                f_atoms = dist.recv(tensor=f_atoms.cuda(), src=world_rank-args.data_parallel_size)
-                f_bonds = dist.recv(tensor=f_bonds.cuda(), src=world_rank-args.data_parallel_size)
-    
-    # cooldown phase
-    if not forward_only:
-        for i in range(num_warmup_microbatches):
-            _, _, a2b, b2a, b2revb, a_scope, b_scope, a2a = micro_batches[i]
-            if i == num_warmup_microbatches - 1:
-                if node_rank == 0:
-                    #enable_grad_sync()
-                    pass
-                input_tensor = input_tensors.pop(0)
-                output_tensor = output_tensors.pop(0)
-                
-                if args.node_rank != args.model_parallel_size - 1:
-                    # recv backward
-                    atom_output_grad = dist.recv(tensor=atom_output_grad.cuda(), src=world_rank+args.data_parallel_size)
-                    bond_output_grad = dist.recv(tensor=bond_output_grad.cuda(), src=world_rank+args.data_parallel_size)
-                    # Backward Step
-                    atom_output.backward(atom_output_grad)
-                    bond_output.backward(bond_output_grad)
-                else:
-                    pred.backward()
+                input_batch = []
                 if args.node_rank != 0:
                     # send backward
-                    dist.isend(tensor=atom_output.grad, dst=world_rank-args.data_parallel_size)
-                    dist.isend(tensor=bond_output.grad, dst=world_rank-args.data_parallel_size)
-    # calculate loss
+                    # print(f"send bw: {f_atoms_feature.grad.size()} at line 2080 to {world_rank - args.data_parallel_size}")
+                    dist.send(tensor=f_atoms_feature.grad, dst=world_rank - args.data_parallel_size)
+                    dist.send(tensor=f_bonds_feature.grad, dst=world_rank - args.data_parallel_size)
+                    
+            else:
+                # Send backward
+                if args.node_rank != 0:
+                    # print(f"send bw: {f_atoms_feature.grad.size()} at line 2085 to {world_rank - args.data_parallel_size}")
+                    dist.send(tensor=f_atoms_feature.grad, dst=world_rank - args.data_parallel_size)
+                    dist.send(tensor=f_bonds_feature.grad, dst=world_rank - args.data_parallel_size)
+                    
+                # Recv forward
+                if args.node_rank != 0:
+                    # print(f"recv fw: {f_atoms_feature.size()} at line 2089 from {world_rank - args.data_parallel_size}")
+                    dist.recv(tensor=f_atoms_feature.cuda(), src=world_rank - args.data_parallel_size)
+                    dist.recv(tensor=f_bonds_feature.cuda(), src=world_rank - args.data_parallel_size)
+                    
+    
+    # cooldown phase
+    # print("\nStart cooldown phase")
     if not forward_only:
-        preds = torch.stack(preds)
-        loss = loss_func(preds, targets) * class_weights * mask
-        loss = loss.sum() / mask.sum()
+        for i in range(num_warmup_microbatches):
+            _, micro_batch = next(enumerate(micro_batches))
+            _, batch, features_batch, mask, targets = micro_batch
+            class_weights = torch.ones(targets.shape).cuda()
+            mask, targets = mask.cuda(), targets.cuda()
+            f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a = batch
+            f_atoms.requires_grad = True
+            f_bonds.requires_grad = True
+            if i == num_warmup_microbatches - 1:
+                if args.node_rank == 0:
+                    #enable_grad_sync()
+                    pass
+            atom_output_grad, bond_output_grad = torch.zeros_like(atom_output), torch.zeros_like(bond_output)
+            if input_batches != []:
+                input_batch = input_batches.pop(0)
+                output_batch = output_batches.pop(0)
+            
+            if args.node_rank != args.model_parallel_size - 1:
+                # recv backward
+                # print(f"recv bw: {atom_output_grad.size()} at line 2113 from {world_rank+args.data_parallel_size}")
+                dist.recv(tensor=atom_output_grad.cuda(), src=world_rank+args.data_parallel_size)
+                dist.recv(tensor=bond_output_grad.cuda(), src=world_rank+args.data_parallel_size)
+                torch.cuda.synchronize()
+                
+                # Backward Step
+                atom_output.backward([atom_output_grad], retain_graph=True)
+                bond_output.backward([bond_output_grad], retain_graph=True)
+            else:
+                atom_output, bond_output = output_batch
+                pred = (atom_output + bond_output)/2
+                loss = loss_func(pred, targets.cuda()) * class_weights * mask
+                loss = loss.sum() / mask.sum()
+                loss.backward()
+            if args.node_rank != 0:
+                # send backward
+                # print(f"send bw: {atom_output.grad.size()} at line 2127 to {world_rank-args.data_parallel_size}")
+                dist.send(tensor=atom_output.grad, dst=world_rank-args.data_parallel_size)
+                dist.send(tensor=bond_output.grad, dst=world_rank-args.data_parallel_size)
+                # release retained graph
+    torch.cuda.empty_cache()
+
+    # calculate loss
+    if args.node_rank==3:
+        if not forward_only:
+            # preds = torch.stack(preds)
+            # loss = loss_func(preds, targets) * class_weights * mask
+            # loss = loss.sum() / mask.sum()
+            pass
     else:
         loss = None
                 
