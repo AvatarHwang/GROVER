@@ -27,7 +27,8 @@ from grover.util.scheduler import NoamLR
 from grover.util.utils import build_optimizer, build_lr_scheduler, makedirs, load_checkpoint, get_loss_func, \
     save_checkpoint, build_model
 from grover.util.utils import get_class_sizes, get_data, split_data, get_task_names
-from task.predict import predict, evaluate, evaluate_predictions
+from task.predict import predict, evaluate, evaluate_predictions, evaluate_for_pp
+from task.dapple import forward_backward_step
 
 import copy
 
@@ -1047,7 +1048,7 @@ def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[
             t_time = time.time() - s_time
             training_time.append(t_time)
             s_time = time.time()
-            val_scores, val_loss = evaluate(
+            val_loss = evaluate_for_pp(
                 model=model,
                 data=val_data,
                 loss_func=loss_func,
@@ -1059,10 +1060,10 @@ def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[
                 shared_dict=shared_dict,
                 logger=logger,
                 args=args
-            )
+                )
             v_time = time.time() - s_time
             # Average validation score
-            avg_val_score = np.nanmean(val_scores)
+            # avg_val_score = np.nanmean(val_scores)
             # Logged after lr step
             if isinstance(scheduler, ExponentialLR):
                 scheduler.step()
@@ -1075,34 +1076,34 @@ def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[
                 print('Epoch: {:04d}'.format(epoch),
                     'loss_train: {:.6f}'.format(train_loss),
                     'loss_val: {:.6f}'.format(val_loss),
-                    f'{args.metric}_val: {avg_val_score:.4f}',
+                    # f'{args.metric}_val: {avg_val_score:.4f}',
                     # 'auc_val: {:.4f}'.format(avg_val_score),
-                    'cur_lr_0: {:.5f}'.format(scheduler_0.get_lr()[-1]),
-                    'cur_lr_2: {:.5f}'.format(scheduler_2.get_lr()[-1]),
+                    # 'cur_lr_0: {:.5f}'.format(scheduler_0.get_lr()[-1]),
+                    # 'cur_lr_2: {:.5f}'.format(scheduler_2.get_lr()[-1]),
                     't_time: {:.4f}s'.format(t_time),
                     'v_time: {:.4f}s'.format(v_time))
 
             if args.tensorboard:
                 writer.add_scalar('loss/train', train_loss, epoch)
                 writer.add_scalar('loss/val', val_loss, epoch)
-                writer.add_scalar(f'{args.metric}_val', avg_val_score, epoch)
+                # writer.add_scalar(f'{args.metric}_val', avg_val_score, epoch)
 
         # Save model checkpoint if improved validation score
-        if local_rank==0:
-            if args.select_by_loss:
-                if val_loss < min_val_loss:
-                    min_val_loss, best_epoch = val_loss, epoch
-                    save_checkpoint(os.path.join(save_dir, 'model.pt'), model, scaler, features_scaler, args)
-            else:
-                if args.minimize_score and avg_val_score < best_score or \
-                        not args.minimize_score and avg_val_score > best_score:
-                    best_score, best_epoch = avg_val_score, epoch
-                    save_checkpoint(os.path.join(save_dir, 'model.pt'), model, scaler, features_scaler, args)
+        # if local_rank==0:
+        #     if args.select_by_loss:
+        #         if val_loss < min_val_loss:
+        #             min_val_loss, best_epoch = val_loss, epoch
+        #             save_checkpoint(os.path.join(save_dir, 'model.pt'), model, scaler, features_scaler, args)
+        #     else:
+        #         if args.minimize_score and avg_val_score < best_score or \
+        #                 not args.minimize_score and avg_val_score > best_score:
+        #             best_score, best_epoch = avg_val_score, epoch
+        #             save_checkpoint(os.path.join(save_dir, 'model.pt'), model, scaler, features_scaler, args)
 
         if epoch - best_epoch > args.early_stop_epoch:
                 break
 
-        if world_rank==0:
+        if world_rank==4:
             ensemble_scores = 0.0
 
             # Evaluate on test set using model with best validation score
@@ -1110,75 +1111,75 @@ def run_pp_training(args: Namespace, time_start, logger: Logger = None) -> List[
                 info(f'Model best val loss = {min_val_loss:.6f} on epoch {best_epoch}')
             else:
                 info(f'Model best validation {args.metric} = {best_score:.6f} on epoch {best_epoch}')
-            model.load_state_dict(torch.load(os.path.join(save_dir, "model.pt")))
+            # model.load_state_dict(torch.load(os.path.join(save_dir, "model.pt")))
 
             # Send best epoch to rank 1
             
-            test_preds, _ = task_parallel_predict(
-                model_0=model_0,
-                model_2=model_2,
-                data=test_data,
-                loss_func=loss_func,
-                batch_size=args.batch_size,
-                logger=logger,
-                shared_dict=shared_dict,
-                scaler=scaler,
-                args=args
-            )
+            # test_preds, _ = task_parallel_predict(
+            #     model_0=model_0,
+            #     model_2=model_2,
+            #     data=test_data,
+            #     loss_func=loss_func,
+            #     batch_size=args.batch_size,
+            #     logger=logger,
+            #     shared_dict=shared_dict,
+            #     scaler=scaler,
+            #     args=args
+            # )
 
-            test_scores = evaluate_predictions(
-                preds=test_preds,
-                targets=test_targets,
-                num_tasks=args.num_tasks,
-                metric_func=metric_func,
-                dataset_type=args.dataset_type,
-                logger=logger
-            )
+            # test_scores = evaluate_predictions(
+            #     preds=test_preds,
+            #     targets=test_targets,
+            #     num_tasks=args.num_tasks,
+            #     metric_func=metric_func,
+            #     dataset_type=args.dataset_type,
+            #     logger=logger
+            # )
 
-            if len(test_preds) != 0:
-                sum_test_preds += np.array(test_preds, dtype=float)
+            # if len(test_preds) != 0:
+            #     sum_test_preds += np.array(test_preds, dtype=float)
 
-            # Average test score
-            avg_test_score = np.nanmean(test_scores)
-            print(f"test scores:{test_scores}")
-            info(f'Model test {args.metric} = {avg_test_score:.6f}')
+            # # Average test score
+            # avg_test_score = np.nanmean(test_scores)
+            # print(f"test scores:{test_scores}")
+            # info(f'Model test {args.metric} = {avg_test_score:.6f}')
 
-            if args.show_individual_scores:
-                # Individual test scores
-                for task_name, test_score in zip(args.task_names, test_scores):
-                    info(f'Model test {task_name} {args.metric} = {test_score:.6f}')
+            # if args.show_individual_scores:
+            #     # Individual test scores
+            #     for task_name, test_score in zip(args.task_names, test_scores):
+            #         info(f'Model test {task_name} {args.metric} = {test_score:.6f}')
 
-            # Evaluate ensemble on test set
-            avg_test_preds = (sum_test_preds / args.ensemble_size).tolist()
+            # # Evaluate ensemble on test set
+            # avg_test_preds = (sum_test_preds / args.ensemble_size).tolist()
 
-            ensemble_scores = evaluate_predictions(
-                preds=avg_test_preds,
-                targets=test_targets,
-                num_tasks=args.num_tasks,
-                metric_func=metric_func,
-                dataset_type=args.dataset_type,
-                logger=logger
-            )
+            # ensemble_scores = evaluate_predictions(
+            #     preds=avg_test_preds,
+            #     targets=test_targets,
+            #     num_tasks=args.num_tasks,
+            #     metric_func=metric_func,
+            #     dataset_type=args.dataset_type,
+            #     logger=logger
+            # )
 
-            ind = [['preds'] * args.num_tasks + ['targets'] * args.num_tasks, args.task_names * 2]
-            ind = pd.MultiIndex.from_tuples(list(zip(*ind)))
-            data = np.concatenate([np.array(avg_test_preds), np.array(test_targets)], 1)
-            test_result = pd.DataFrame(data, index=test_smiles, columns=ind)
-            test_result.to_csv(os.path.join(args.save_dir, 'test_result.csv'))
+            # ind = [['preds'] * args.num_tasks + ['targets'] * args.num_tasks, args.task_names * 2]
+            # ind = pd.MultiIndex.from_tuples(list(zip(*ind)))
+            # data = np.concatenate([np.array(avg_test_preds), np.array(test_targets)], 1)
+            # test_result = pd.DataFrame(data, index=test_smiles, columns=ind)
+            # test_result.to_csv(os.path.join(args.save_dir, 'test_result.csv'))
 
-            # Average ensemble score
-            avg_ensemble_test_score = np.nanmean(ensemble_scores)
-            info(f'Ensemble test {args.metric} = {avg_ensemble_test_score:.6f}')
+            # # Average ensemble score
+            # avg_ensemble_test_score = np.nanmean(ensemble_scores)
+            # info(f'Ensemble test {args.metric} = {avg_ensemble_test_score:.6f}')
 
-            # Individual ensemble scores
-            if args.show_individual_scores:
-                for task_name, ensemble_score in zip(args.task_names, ensemble_scores):
-                    info(f'Ensemble test {task_name} {args.metric} = {ensemble_score:.6f}')
-            print(f"ensemble_scores : {ensemble_scores}")
+            # # Individual ensemble scores
+            # if args.show_individual_scores:
+            #     for task_name, ensemble_score in zip(args.task_names, ensemble_scores):
+            #         info(f'Ensemble test {task_name} {args.metric} = {ensemble_score:.6f}')
+            # print(f"ensemble_scores : {ensemble_scores}")
 
-            #Delete: for measurement
-            print(f"\ntraining time is:{training_time}")
-            #print(f"\nloss_measure time is:{loss_measure}")
+            # #Delete: for measurement
+            # print(f"\ntraining time is:{training_time}")
+            # #print(f"\nloss_measure time is:{loss_measure}")
 
             return ensemble_scores
 
@@ -1677,265 +1678,39 @@ def train_pp(epoch, model, data, loss_func, optimizer, scheduler,
                             num_workers=num_workers, collate_fn=mol_collator, pin_memory=True)
 
     iteration=-1
-    for _, item in enumerate(mol_loader):
-        iteration+=1
-        if iteration%args.num_micro_batch==0:
-            micro_batches = []
-            micro_batches.append(item)
-            for i in range(1, args.num_micro_batch):
-                micro_batches.append(next(enumerate(mol_loader))[1])
+    while(len(mol_loader)>0):
+        # iteration+=1
+        # if iteration%args.num_micro_batch==0:
+        micro_batches = []
+        # micro_batches.append(item)
+        for i in range(args.num_micro_batch):
+            micro_batches.append(next(enumerate(mol_loader))[1])
+            mol_loader.dataset.data.pop(0)
 
-            with nvtx.annotate(f"rank {dist.get_rank()} step {n_iter/args.batch_size}"):
-                step_time = time.time()
+        with nvtx.annotate(f"rank {dist.get_rank()} step {n_iter/args.batch_size}"):
+            step_time = time.time()
 
-                with nvtx.annotate(f"zerograd even {n_iter/args.batch_size}", color="red"):
-                    model.zero_grad()
-                
-                forward_only = False
-                loss = forward_backward_step(model, micro_batches, args, forward_only)
-                print("forward_backward_step done!")
-                if args.node_rank==3:
-                    loss_sum += loss.item()
-                    cum_loss_sum += loss.item()
-                iter_count += args.batch_size
-                cum_iter_count += 1
+            with nvtx.annotate(f"zerograd even {n_iter/args.batch_size}", color="red"):
+                model.zero_grad()
+            
+            forward_only = False
+            loss = forward_backward_step(model, micro_batches, args, forward_only)
+            print("forward_backward_step done!")
+            if args.node_rank==3:
+                loss_sum += loss.item()
+                cum_loss_sum += loss.item()
+            iter_count += args.batch_size
+            cum_iter_count += 1
 
-                with nvtx.annotate(f"optim even {n_iter/args.batch_size}", color="blue"):
-                    optimizer.step()
-                    if isinstance(scheduler, NoamLR):
-                        scheduler.step()
+            with nvtx.annotate(f"optim even {n_iter/args.batch_size}", color="blue"):
+                optimizer.step()
+                if isinstance(scheduler, NoamLR):
+                    scheduler.step()
 
-                n_iter += args.batch_size
-        else:
-            pass
+            n_iter += args.batch_size
+        print(f"remained data size:{len(mol_loader)}")
+        # else:
+        #     pass
 
     return n_iter, (cum_loss_sum / cum_iter_count)
 
-
-def forward_backward_step(model, micro_batches, args, forward_only):
-
-    loss_func = get_loss_func(args, model)
-    #disable_grad_sync()
-    num_micro_batch = args.num_micro_batch
-    model_parallel_size = args.model_parallel_size
-    num_warmup_microbatches = min(model_parallel_size - args.node_rank -1, num_micro_batch)
-    num_microbatches_remaining = num_micro_batch - num_warmup_microbatches
-
-    world_rank = dist.get_rank()
-
-    input_tensors, output_tensors = [], []
-    if not forward_only:
-        input_batches, output_batches = [], []
-    losses = []
-
-    # Warmup forward passes
-    # print(f"num_warmup_microbatches: {num_warmup_microbatches}")
-    for i in range(num_warmup_microbatches):
-        _, micro_batch = next(enumerate(micro_batches))
-        _, batch, features_batch, mask, targets = micro_batch
-        mask, targets = mask.cuda(), targets.cuda()
-        class_weights = torch.ones(targets.shape).cuda()
-        f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope, a2a = batch
-        # Recv forward
-        if args.node_rank != 0:
-            f_atoms_feature = torch.empty(f_atoms_original.size(0), args.hidden_size).cuda()
-            f_bonds_feature = torch.empty(f_bonds_original.size(0), args.hidden_size).cuda()
-            # print(f"recv fw: {f_atoms_feature.size()} at line 1974 to {world_rank-args.data_parallel_size}")
-            dist.recv(tensor=f_atoms_feature.cuda(), src=world_rank-args.data_parallel_size)
-            dist.recv(tensor=f_bonds_feature.cuda(), src=world_rank-args.data_parallel_size)
-            
-            f_atoms_feature.requires_grad = True
-            f_bonds_feature.requires_grad = True
-        else:
-            f_atoms_feature = None
-            f_bonds_feature = None
-        input_batch = (f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope, 
-                        a2a, f_atoms_feature, f_bonds_feature)
-        
-        # Forward Step
-        output_batch = model(input_batch, features_batch)
-        if args.node_rank==3:
-            atom_output, bond_output = output_batch
-        else:
-            atom_output, bond_output, _, _, _, _, _, _, _, _ = output_batch
-        # Send FW
-        if args.node_rank != args.model_parallel_size - 1:
-            # print(f"send fw: {atom_output.size()} at line 1993 to {world_rank+args.data_parallel_size}")
-            dist.send(tensor=atom_output.cuda(), dst=world_rank + args.data_parallel_size)
-            dist.send(tensor=bond_output.cuda(), dst=world_rank + args.data_parallel_size)
-            
-
-        if not forward_only:
-            input_batches.append(input_batch)
-            output_batches.append(output_batch)
-
-    if num_microbatches_remaining > 0:
-        # recv forward
-        if args.node_rank != 0:
-            if args.node_rank == args.model_parallel_size - 1:
-                _, micro_batch = next(enumerate(micro_batches))
-                _, batch, _, _, _ = micro_batch
-                f_atoms_original, f_bonds_original,  _, _, _, _, _, _ = batch
-            f_atoms_feature = torch.empty(f_atoms_original.size(0), args.hidden_size).cuda()
-            f_bonds_feature = torch.empty(f_bonds_original.size(0), args.hidden_size).cuda()
-            # print(f"recv fw: {f_atoms_feature.size()} at line 2014 from {world_rank-args.data_parallel_size}")
-            dist.recv(tensor=f_atoms_feature, src=world_rank - args.data_parallel_size)
-            dist.recv(tensor=f_bonds_feature, src=world_rank - args.data_parallel_size)
-            
-            f_atoms_feature.requires_grad = True
-            f_bonds_feature.requires_grad = True
-        else:
-            f_atoms_feature = None
-            f_bonds_feature = None
-
-    # 1F1B
-    # print("\nStart 1F1B")
-    for i in range(num_microbatches_remaining):
-        _, micro_batch = next(enumerate(micro_batches))
-        _, batch, features_batch, mask, targets = micro_batch
-        class_weights = torch.ones(targets.shape).cuda()
-        mask, targets = mask.cuda(), targets.cuda()
-        f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope, a2a = batch
-        input_batch = (f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope, a2a, f_atoms_feature, f_bonds_feature)
-        last_iteration = i == (num_microbatches_remaining - 1)
-        # print(f"last_iteration: {last_iteration}")
-        # Forward Step
-        output_batch = model(input_batch, features_batch)
-        if args.node_rank==3:
-            atom_output, bond_output = output_batch
-            pred = (atom_output + bond_output)/2
-            loss = loss_func(pred, targets.cuda()) * class_weights * mask
-            loss = loss.sum() / mask.sum()
-            losses.append(loss)
-        else:
-            atom_output, bond_output, _, _, _, _, _, _, _, _ = output_batch
-
-        if forward_only:
-            # Send FW
-            if args.node_rank != args.model_parallel_size - 1:
-                dist.send(tensor=atom_output.cuda(), dst=world_rank+args.data_parallel_size)
-                dist.send(tensor=bond_output.cuda(), dst=world_rank+args.data_parallel_size)
-            if not last_iteration:
-                # Recv forward
-                if args.node_rank != 0:
-                    f_atoms_feature = torch.empty(f_atoms_original.size(0), args.hidden_size).cuda()
-                    f_bonds_feature = torch.empty(f_bonds_original.size(0), args.hidden_size).cuda()
-                    f_atoms_feature.requires_grad = True
-                    f_bonds_feature.requires_grad = True
-                    dist.recv(tensor=f_atoms_feature.cuda(), src=world_rank-args.data_parallel_size)
-                    dist.recv(tensor=f_bonds_feature.cuda(), src=world_rank-args.data_parallel_size)
-        else:
-            # Send FW recv BW
-            if args.node_rank != args.model_parallel_size - 1:
-
-                atom_output_grad, bond_output_grad = torch.zeros_like(atom_output), torch.zeros_like(bond_output)
-                # Recv BW
-                # print(f"recv bw: {atom_output_grad.size()} at line 2054 from {world_rank + args.data_parallel_size}")
-                dist.recv(tensor=atom_output_grad.cuda(), src=world_rank + args.data_parallel_size)
-                dist.recv(tensor=bond_output_grad.cuda(), src=world_rank + args.data_parallel_size)
-                
-                # Send FW
-                # print(f"send fw: {atom_output.size()} at line 2052 to {world_rank + args.data_parallel_size}")
-                dist.send(tensor=atom_output.cuda(), dst=world_rank + args.data_parallel_size)
-                dist.send(tensor=bond_output.cuda(), dst=world_rank + args.data_parallel_size)
-
-                output_batch = (f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope,a2a, f_atoms_feature, f_bonds_feature)
-                if f_atoms_feature is not None:
-                    f_atoms_feature.retain_grad()
-                    f_bonds_feature.retain_grad()
-                input_batches.append(input_batch)
-                output_batches.append(output_batch)
-
-                if input_batches != []:
-                    input_batch = input_batches.pop(0)
-                    output_batch = output_batches.pop(0)
-
-                # Backward Step
-                atom_output.backward(atom_output_grad, retain_graph=True)
-                bond_output.backward(bond_output_grad, retain_graph=True)
-            else: # if last rank
-                pred = (atom_output + bond_output)/2
-                f_atoms_feature.retain_grad()
-                f_bonds_feature.retain_grad()
-                loss = loss_func(pred, targets.cuda()) * class_weights * mask
-                loss = loss.sum() / mask.sum()
-                losses.append(loss)
-                loss.backward(retain_graph=True)
-
-            if last_iteration:
-                input_batch = []
-                if args.node_rank != 0:
-                    # send backward
-                    # print(f"send bw: {f_atoms_feature.grad.size()} at line 2080 to {world_rank - args.data_parallel_size}")
-                    dist.send(tensor=f_atoms_feature.grad, dst=world_rank - args.data_parallel_size)
-                    dist.send(tensor=f_bonds_feature.grad, dst=world_rank - args.data_parallel_size)
-                    
-            else:
-                # Send backward
-                if args.node_rank != 0:
-                    # print(f"send bw: {f_atoms_feature.grad.size()} at line 2085 to {world_rank - args.data_parallel_size}")
-                    dist.send(tensor=f_atoms_feature.grad, dst=world_rank - args.data_parallel_size)
-                    dist.send(tensor=f_bonds_feature.grad, dst=world_rank - args.data_parallel_size)
-                    
-                # Recv forward
-                if args.node_rank != 0:
-                    # print(f"recv fw: {f_atoms_feature.size()} at line 2089 from {world_rank - args.data_parallel_size}")
-                    dist.recv(tensor=f_atoms_feature.cuda(), src=world_rank - args.data_parallel_size)
-                    dist.recv(tensor=f_bonds_feature.cuda(), src=world_rank - args.data_parallel_size)
-                    
-    
-    # cooldown phase
-    # print("\nStart cooldown phase")
-    if not forward_only:
-        for i in range(num_warmup_microbatches):
-            _, micro_batch = next(enumerate(micro_batches))
-            _, batch, features_batch, mask, targets = micro_batch
-            class_weights = torch.ones(targets.shape).cuda()
-            mask, targets = mask.cuda(), targets.cuda()
-            f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a = batch
-            f_atoms.requires_grad = True
-            f_bonds.requires_grad = True
-            if i == num_warmup_microbatches - 1:
-                if args.node_rank == 0:
-                    #enable_grad_sync()
-                    pass
-            atom_output_grad, bond_output_grad = torch.zeros_like(atom_output), torch.zeros_like(bond_output)
-            if input_batches != []:
-                input_batch = input_batches.pop(0)
-                output_batch = output_batches.pop(0)
-            
-            if args.node_rank != args.model_parallel_size - 1:
-                # recv backward
-                # print(f"recv bw: {atom_output_grad.size()} at line 2113 from {world_rank+args.data_parallel_size}")
-                dist.recv(tensor=atom_output_grad.cuda(), src=world_rank+args.data_parallel_size)
-                dist.recv(tensor=bond_output_grad.cuda(), src=world_rank+args.data_parallel_size)
-                torch.cuda.synchronize()
-                
-                # Backward Step
-                atom_output.backward([atom_output_grad], retain_graph=True)
-                bond_output.backward([bond_output_grad], retain_graph=True)
-            else:
-                atom_output, bond_output = output_batch
-                pred = (atom_output + bond_output)/2
-                loss = loss_func(pred, targets.cuda()) * class_weights * mask
-                loss = loss.sum() / mask.sum()
-                loss.backward()
-            if args.node_rank != 0:
-                # send backward
-                # print(f"send bw: {atom_output.grad.size()} at line 2127 to {world_rank-args.data_parallel_size}")
-                dist.send(tensor=atom_output.grad, dst=world_rank-args.data_parallel_size)
-                dist.send(tensor=bond_output.grad, dst=world_rank-args.data_parallel_size)
-                # release retained graph
-    torch.cuda.empty_cache()
-
-    # calculate loss
-    if args.node_rank==3:
-        if not forward_only:
-            # preds = torch.stack(preds)
-            # loss = loss_func(preds, targets) * class_weights * mask
-            # loss = loss.sum() / mask.sum()
-            pass
-    else:
-        loss = None
-                
-    return loss

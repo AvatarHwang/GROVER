@@ -2,10 +2,10 @@ NUM_NODES=4
 NUM_GPU_PER_NODE=1
 NODE_RANK=$1
 WORLD_SIZE=$(($NUM_NODES * $NUM_GPU_PER_NODE))
-HOST_NODE_ADDR=192.168.120.86
-BATCH_SIZE=512
+HOST_NODE_ADDR=192.168.120.62
+BATCH_SIZE=32
 DATA_PARALLEL_SIZE=$NUM_GPU_PER_NODE
-MICRO_BATCH_SIZE=32
+MICRO_BATCH_SIZE=8
 NUM_MICRO_BATCH=$(($BATCH_SIZE / $MICRO_BATCH_SIZE / $DATA_PARALLEL_SIZE))
 MODEL_PARALLEL_SIZE=$NUM_NODES
 
@@ -14,7 +14,7 @@ torchrun \
 --nproc_per_node=$NUM_GPU_PER_NODE \
 --node_rank=$NODE_RANK \
 --master_addr=$HOST_NODE_ADDR \
---master_port=29534 \
+--master_port=29606 \
 main.py finetune \
 --data_path exampledata/finetune/toxcast.csv \
 --features_path exampledata/finetune/toxcast.npz \
@@ -25,7 +25,7 @@ main.py finetune \
 --ensemble_size 1 \
 --num_folds 1 \
 --no_features_scaling \
---epochs 10 \
+--epochs 1 \
 --init_lr 0.00015 \
 --ffn_hidden_size 700 \
 --batch_size $BATCH_SIZE \

@@ -10,8 +10,18 @@ import torch
 from torch.nn import Module
 from torch.utils.data import DataLoader
 
-from grover.model.models import GroverTask
+from grover.model.models import GroverTask, GroverTask_for_pp
 from grover.util.multi_gpu_wrapper import MultiGpuWrapper as mgw
+
+from task.dapple import forward_backward_step
+
+import copy
+
+from torch import Tensor
+from typing import Callable, Iterable, Iterator, List, Tuple, Union, cast
+Tensors = Tuple[Tensor, ...]
+TensorOrTensors = Union[Tensor, Tensors]
+Function = Callable[[TensorOrTensors], TensorOrTensors]
 
 
 class GROVERTrainer:
@@ -47,7 +57,10 @@ class GROVERTrainer:
         self.args = args
         self.with_cuda = with_cuda
         self.grover = embedding_model
-        self.model = GroverTask(args, embedding_model, atom_vocab_size, bond_vocab_size, fg_szie)
+        if args.pipeline_parallel:
+            self.model = GroverTask_for_pp(args, embedding_model, atom_vocab_size, bond_vocab_size, fg_szie)
+        else:
+            self.model = GroverTask(args, embedding_model, atom_vocab_size, bond_vocab_size, fg_szie)
         self.loss_func = self.model.get_loss_func(args)
         self.enable_multi_gpu = enable_multi_gpu
 
@@ -69,6 +82,9 @@ class GROVERTrainer:
                                                       named_parameters=self.model.named_parameters())
         self.args = args
         self.n_iter = 0
+
+        self.pipeline_parallel = args.pipeline_parallel
+        self.micro_batch_size = args.micro_batch_size
 
     def broadcast_parameters(self) -> None:
         """
@@ -121,7 +137,7 @@ class GROVERTrainer:
         :param train: True: train model, False: validation model.
         :return: the loss terms as a list
         """
-
+        data_loader_cp = copy.deepcopy(data_loader)
         if train:
             self.model.train()
         else:
@@ -130,73 +146,171 @@ class GROVERTrainer:
         loss_sum, iter_count = 0, 0
         cum_loss_sum, cum_iter_count = 0, 0
         av_loss_sum, bv_loss_sum, fg_loss_sum, av_dist_loss_sum, bv_dist_loss_sum, fg_dist_loss_sum = 0, 0, 0, 0, 0, 0
-        # loss_func = self.model.get_loss_func(self.args)
+        loss_func = self.model.get_loss_func(self.args)
 
-        for _, item in enumerate(data_loader):
-            batch_graph = item["graph_input"]
-            targets = item["targets"]
+        if self.pipeline_parallel:
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                schedule=torch.profiler.schedule(
+                    wait=0,
+                    warmup=0,
+                    active=2,
+                    repeat=1),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
+                with_stack=True,
+                with_flops=True,
+                with_modules=True
+                ) as p:
+                    #while(len(data_loader_cp.dataset.data)>=self.args.num_micro_batch):
+                    while(len(data_loader_cp.dataset.data)>0):
+                        mini_batch = next(iter(data_loader_cp))
+                        # split item into micro batches
+                        f_atoms_original, f_bonds_original, a2b, b2a, b2revb, a_scope, b_scope, a2a = mini_batch["graph_input"]
+                        f_atoms_original = split_minibatch(f_atoms_original, self.args.num_micro_batch)
+                        f_bonds_original = split_minibatch(f_bonds_original, self.args.num_micro_batch)
+                        a2b = split_minibatch(a2b, self.args.num_micro_batch)
+                        b2a = split_minibatch(b2a, self.args.num_micro_batch)
+                        b2revb = split_minibatch(b2revb, self.args.num_micro_batch)
+                        a_scope = split_minibatch(a_scope, self.args.num_micro_batch)
+                        b_scope = split_minibatch(b_scope, self.args.num_micro_batch)
+                        a2a = split_minibatch(a2a, self.args.num_micro_batch)
+                        targets_av_task = split_minibatch(mini_batch["targets"]["av_task"], self.args.num_micro_batch)
+                        targets_bv_task = split_minibatch(mini_batch["targets"]["bv_task"], self.args.num_micro_batch)
+                        targets_fg_task = split_minibatch(mini_batch["targets"]["fg_task"], self.args.num_micro_batch)
+                        micro_batches = []
+                        for i in range(self.args.num_micro_batch):
+                            micro_batch = {}
+                            micro_batch["graph_input"] = (f_atoms_original[i], f_bonds_original[i], a2b[i], b2a[i], b2revb[i], a_scope[i], b_scope[i], a2a[i])
+                            micro_batch["targets"] = {}
+                            micro_batch["targets"]["av_task"] = targets_av_task[i]
+                            micro_batch["targets"]["bv_task"] = targets_bv_task[i]
+                            micro_batch["targets"]["fg_task"] = targets_fg_task[i]
+                            micro_batches.append(micro_batch)
+                        
+                        # for i in range(self.args.num_micro_batch):
+                        #     micro_batches.append(next(iter(data_loader_cp)))
+                        #     data_loader_cp.dataset.data = data_loader_cp.dataset.data[1:]
 
-            if next(self.model.parameters()).is_cuda:
-                targets["av_task"] = targets["av_task"].cuda()
-                targets["bv_task"] = targets["bv_task"].cuda()
-                targets["fg_task"] = targets["fg_task"].cuda()
+                        if len(micro_batches)<self.args.num_micro_batch:
+                            break
+                        
+                        forward_only = False if train else True
+                        losses = forward_backward_step(self.model, micro_batches, self.args, forward_only, loss_func)
+                        if self.args.node_rank == 3:
+                            if losses != []:
+                                for losse in losses:
+                                    loss, av_loss, bv_loss, fg_loss, av_dist_loss, bv_dist_loss, fg_dist_loss = losse
+                                    loss_sum += loss.item()
+                                    av_loss_sum += av_loss.item()
+                                    bv_loss_sum += bv_loss.item()
+                                    fg_loss_sum += fg_loss.item()
+                                    av_dist_loss_sum += av_dist_loss.item() if type(av_dist_loss) != float else av_dist_loss
+                                    bv_dist_loss_sum += bv_dist_loss.item() if type(bv_dist_loss) != float else bv_dist_loss
+                                    fg_dist_loss_sum += fg_dist_loss.item() if type(fg_dist_loss) != float else fg_dist_loss
+                            iter_count += self.args.batch_size
 
-            preds = self.model(batch_graph)
+                            if train:
+                                cum_loss_sum += loss.item()
+                                # Run model
+                                # self.model.zero_grad()
+                                self.optimizer.zero_grad()
+                                # loss.backward()
+                                self.optimizer.step()
+                                self.scheduler.step()
+                            else:
+                                # For eval model, only consider the loss of three task.
+                                cum_loss_sum += av_loss.item()
+                                cum_loss_sum += bv_loss.item()
+                                cum_loss_sum += fg_loss.item()
 
-            # # ad-hoc code, for visualizing a model, comment this block when it is not needed
-            # import dglt.contrib.grover.vis_model as vis_model
-            # for task in ['av_task', 'bv_task', 'fg_task']:
-            #     vis_graph = vis_model.make_dot(self.model(batch_graph)[task],
-            #                                    params=dict(self.model.named_parameters()))
-            #     # vis_graph.view()
-            #     vis_graph.render(f"{self.args.backbone}_model_{task}_vis.png", format="png")
-            # exit()
+                        cum_iter_count += 1
+                        self.n_iter += self.args.batch_size
 
-            loss, av_loss, bv_loss, fg_loss, av_dist_loss, bv_dist_loss, fg_dist_loss = self.loss_func(preds, targets)
+                        p.step()
 
-            loss_sum += loss.item()
-            iter_count += self.args.batch_size
-
-            if train:
-                cum_loss_sum += loss.item()
-                # Run model
-                self.model.zero_grad()
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-                self.scheduler.step()
+            if self.args.node_rank==3:
+                if cum_iter_count != 0:
+                    cum_loss_sum /= cum_iter_count
+                    av_loss_sum /= cum_iter_count
+                    bv_loss_sum /= cum_iter_count
+                    fg_loss_sum /= cum_iter_count
+                    av_dist_loss_sum /= cum_iter_count
+                    bv_dist_loss_sum /= cum_iter_count
+                    fg_dist_loss_sum /= cum_iter_count
             else:
-                # For eval model, only consider the loss of three task.
-                cum_loss_sum += av_loss.item()
-                cum_loss_sum += bv_loss.item()
-                cum_loss_sum += fg_loss.item()
+                return self.n_iter, None, (None, None, None, None, None, None)
 
-            av_loss_sum += av_loss.item()
-            bv_loss_sum += bv_loss.item()
-            fg_loss_sum += fg_loss.item()
-            av_dist_loss_sum += av_dist_loss.item() if type(av_dist_loss) != float else av_dist_loss
-            bv_dist_loss_sum += bv_dist_loss.item() if type(bv_dist_loss) != float else bv_dist_loss
-            fg_dist_loss_sum += fg_dist_loss.item() if type(fg_dist_loss) != float else fg_dist_loss
+            return self.n_iter, cum_loss_sum, (av_loss_sum, bv_loss_sum, fg_loss_sum, av_dist_loss_sum,
+                                            bv_dist_loss_sum, fg_dist_loss_sum)
+        else:
+            for _, item in enumerate(data_loader):
+                batch_graph = item["graph_input"]
+                targets = item["targets"]
 
-            cum_iter_count += 1
-            self.n_iter += self.args.batch_size
+                if next(self.model.parameters()).is_cuda:
+                    targets["av_task"] = targets["av_task"].cuda()
+                    targets["bv_task"] = targets["bv_task"].cuda()
+                    targets["fg_task"] = targets["fg_task"].cuda()
 
-            # Debug only.
-            # if i % 50 == 0:
-            #     print(f"epoch: {epoch}, batch_id: {i}, av_loss: {av_loss}, bv_loss: {bv_loss}, "
-            #           f"fg_loss: {fg_loss}, av_dist_loss: {av_dist_loss}, bv_dist_loss: {bv_dist_loss}, "
-            #           f"fg_dist_loss: {fg_dist_loss}")
+                preds = self.model(batch_graph)
 
-        cum_loss_sum /= cum_iter_count
-        av_loss_sum /= cum_iter_count
-        bv_loss_sum /= cum_iter_count
-        fg_loss_sum /= cum_iter_count
-        av_dist_loss_sum /= cum_iter_count
-        bv_dist_loss_sum /= cum_iter_count
-        fg_dist_loss_sum /= cum_iter_count
+                # # ad-hoc code, for visualizing a model, comment this block when it is not needed
+                # import dglt.contrib.grover.vis_model as vis_model
+                # for task in ['av_task', 'bv_task', 'fg_task']:
+                #     vis_graph = vis_model.make_dot(self.model(batch_graph)[task],
+                #                                    params=dict(self.model.named_parameters()))
+                #     # vis_graph.view()
+                #     vis_graph.render(f"{self.args.backbone}_model_{task}_vis.png", format="png")
+                # exit()
 
-        return self.n_iter, cum_loss_sum, (av_loss_sum, bv_loss_sum, fg_loss_sum, av_dist_loss_sum,
-                                           bv_dist_loss_sum, fg_dist_loss_sum)
+                loss, av_loss, bv_loss, fg_loss, av_dist_loss, bv_dist_loss, fg_dist_loss = self.loss_func(preds, targets)
+
+                loss_sum += loss.item()
+                iter_count += self.args.batch_size
+
+                if train:
+                    cum_loss_sum += loss.item()
+                    # Run model
+                    self.model.zero_grad()
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+                    self.scheduler.step()
+                else:
+                    # For eval model, only consider the loss of three task.
+                    cum_loss_sum += av_loss.item()
+                    cum_loss_sum += bv_loss.item()
+                    cum_loss_sum += fg_loss.item()
+
+                av_loss_sum += av_loss.item()
+                bv_loss_sum += bv_loss.item()
+                fg_loss_sum += fg_loss.item()
+                av_dist_loss_sum += av_dist_loss.item() if type(av_dist_loss) != float else av_dist_loss
+                bv_dist_loss_sum += bv_dist_loss.item() if type(bv_dist_loss) != float else bv_dist_loss
+                fg_dist_loss_sum += fg_dist_loss.item() if type(fg_dist_loss) != float else fg_dist_loss
+
+                cum_iter_count += 1
+                self.n_iter += self.args.batch_size
+
+                # Debug only.
+                # if i % 50 == 0:
+                #     print(f"epoch: {epoch}, batch_id: {i}, av_loss: {av_loss}, bv_loss: {bv_loss}, "
+                #           f"fg_loss: {fg_loss}, av_dist_loss: {av_dist_loss}, bv_dist_loss: {bv_dist_loss}, "
+                #           f"fg_dist_loss: {fg_dist_loss}")
+
+            cum_loss_sum /= cum_iter_count
+            av_loss_sum /= cum_iter_count
+            bv_loss_sum /= cum_iter_count
+            fg_loss_sum /= cum_iter_count
+            av_dist_loss_sum /= cum_iter_count
+            bv_dist_loss_sum /= cum_iter_count
+            fg_dist_loss_sum /= cum_iter_count
+
+            return self.n_iter, cum_loss_sum, (av_loss_sum, bv_loss_sum, fg_loss_sum, av_dist_loss_sum,
+                                            bv_dist_loss_sum, fg_dist_loss_sum)
 
     def save(self, epoch, file_path, name=None) -> str:
         """
@@ -277,3 +391,21 @@ class GROVERTrainer:
         self.scheduler.current_step = scheduler_step
         print("Restore checkpoint, current epoch: %d" % (epoch))
         return epoch, scheduler_step
+
+
+def split_minibatch(input: TensorOrTensors, chunks: int):
+    """Splits an input mini-batch into multiple micro-batches."""
+    inputs: Iterable[TensorOrTensors]
+
+    if isinstance(input, Tensor):
+        inputs = input.chunk(chunks)
+    else:
+        rotated: List[Tensors] = []
+
+        for tensor in input:
+            tensors = tensor.chunk(chunks)
+            rotated.append(cast(Tensors, tensors))
+
+        inputs = zip(*rotated)
+
+    return [x for x in inputs]

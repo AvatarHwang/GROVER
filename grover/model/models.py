@@ -9,7 +9,7 @@ import torch
 from torch import nn as nn
 
 from grover.data import get_atom_fdim, get_bond_fdim
-from grover.model.layers import Readout, GTransEncoder
+from grover.model.layers import Readout, GTransEncoder, GTransEncoder_for_pp
 from grover.util.nn_utils import get_activation_function
 
 
@@ -198,6 +198,7 @@ class GroverTask(nn.Module):
         self.fg_task_all = FunctionalGroupPrediction(args, fg_size)
 
         self.embedding_output_type = args.embedding_output_type
+        self.node_rank = args.node_rank
 
     @staticmethod
     def get_loss_func(args: Namespace) -> Callable:
@@ -299,7 +300,6 @@ class GroverTask(nn.Module):
         return {"av_task": (av_task_pred_atom, av_task_pred_bond),
                 "bv_task": (bv_task_pred_atom, bv_task_pred_bond),
                 "fg_task": fg_task_pred_all}
-
 
 class GroverFpGeneration(nn.Module):
     """
@@ -504,3 +504,182 @@ class GroverFinetuneTask(nn.Module):
             output = (atom_ffn_output + bond_ffn_output) / 2
 
         return output
+
+
+
+class GroverTask_for_pp(nn.Module):
+    """
+    The pretrain module.
+    """
+    def __init__(self, args, grover, atom_vocab_size, bond_vocab_size, fg_size):
+        super(GroverTask_for_pp, self).__init__()
+        self.grover = grover
+        self.av_task_atom = AtomVocabPrediction(args, atom_vocab_size)
+        self.av_task_bond = AtomVocabPrediction(args, atom_vocab_size)
+        self.bv_task_atom = BondVocabPrediction(args, bond_vocab_size)
+        self.bv_task_bond = BondVocabPrediction(args, bond_vocab_size)
+
+        self.fg_task_all = FunctionalGroupPrediction(args, fg_size)
+
+        self.embedding_output_type = args.embedding_output_type
+        self.node_rank = args.node_rank
+
+    @staticmethod
+    def get_loss_func(args: Namespace) -> Callable:
+        """
+        The loss function generator.
+        :param args: the arguments.
+        :return: the loss fucntion for GroverTask.
+        """
+        def loss_func(preds, targets, dist_coff=args.dist_coff):
+            """
+            The loss function for GroverTask.
+            :param preds: the predictions.
+            :param targets: the targets.
+            :param dist_coff: the default disagreement coefficient for the distances between different branches.
+            :return:
+            """
+            av_task_loss = nn.NLLLoss(ignore_index=0, reduction="mean")  # same for av and bv
+
+            fg_task_loss = nn.BCEWithLogitsLoss(reduction="mean")
+            # av_task_dist_loss = nn.KLDivLoss(reduction="mean")
+            av_task_dist_loss = nn.MSELoss(reduction="mean")
+            fg_task_dist_loss = nn.MSELoss(reduction="mean")
+            sigmoid = nn.Sigmoid()
+
+            av_atom_loss, av_bond_loss, av_dist_loss = 0.0, 0.0, 0.0
+            fg_atom_from_atom_loss, fg_atom_from_bond_loss, fg_atom_dist_loss = 0.0, 0.0, 0.0
+            bv_atom_loss, bv_bond_loss, bv_dist_loss = 0.0, 0.0, 0.0
+            fg_bond_from_atom_loss, fg_bond_from_bond_loss, fg_bond_dist_loss = 0.0, 0.0, 0.0
+
+            if preds["av_task"][0] is not None:
+                av_atom_loss = av_task_loss(preds['av_task'][0], targets["av_task"])
+                fg_atom_from_atom_loss = fg_task_loss(preds["fg_task"]["atom_from_atom"], targets["fg_task"])
+
+            if preds["av_task"][1] is not None:
+                av_bond_loss = av_task_loss(preds['av_task'][1], targets["av_task"])
+                fg_atom_from_bond_loss = fg_task_loss(preds["fg_task"]["atom_from_bond"], targets["fg_task"])
+
+            if preds["bv_task"][0] is not None:
+                bv_atom_loss = av_task_loss(preds['bv_task'][0], targets["bv_task"])
+                fg_bond_from_atom_loss = fg_task_loss(preds["fg_task"]["bond_from_atom"], targets["fg_task"])
+
+            if preds["bv_task"][1] is not None:
+                bv_bond_loss = av_task_loss(preds['bv_task'][1], targets["bv_task"])
+                fg_bond_from_bond_loss = fg_task_loss(preds["fg_task"]["bond_from_bond"], targets["fg_task"])
+
+            if preds["av_task"][0] is not None and preds["av_task"][1] is not None:
+                av_dist_loss = av_task_dist_loss(preds['av_task'][0], preds['av_task'][1])
+                fg_atom_dist_loss = fg_task_dist_loss(sigmoid(preds["fg_task"]["atom_from_atom"]),
+                                                      sigmoid(preds["fg_task"]["atom_from_bond"]))
+
+            if preds["bv_task"][0] is not None and preds["bv_task"][1] is not None:
+                bv_dist_loss = av_task_dist_loss(preds['bv_task'][0], preds['bv_task'][1])
+                fg_bond_dist_loss = fg_task_dist_loss(sigmoid(preds["fg_task"]["bond_from_atom"]),
+                                                      sigmoid(preds["fg_task"]["bond_from_bond"]))
+
+            av_loss = av_atom_loss + av_bond_loss
+            bv_loss = bv_atom_loss + bv_bond_loss
+            fg_atom_loss = fg_atom_from_atom_loss + fg_atom_from_bond_loss
+            fg_bond_loss = fg_bond_from_atom_loss + fg_bond_from_bond_loss
+
+            fg_loss = fg_atom_loss + fg_bond_loss
+            fg_dist_loss = fg_atom_dist_loss + fg_bond_dist_loss
+
+            # dist_loss = av_dist_loss + bv_dist_loss + fg_dist_loss
+            # print("%.4f %.4f %.4f %.4f %.4f %.4f"%(av_atom_loss,
+            #                                       av_bond_loss,
+            #                                       fg_atom_loss,
+            #                                       fg_bond_loss,
+            #                                       av_dist_loss,
+            #                                       fg_dist_loss))
+            # return av_loss + fg_loss + dist_coff * dist_loss
+            overall_loss = av_loss + bv_loss + fg_loss + dist_coff * av_dist_loss + \
+                           dist_coff * bv_dist_loss + fg_dist_loss
+
+            return overall_loss, av_loss, bv_loss, fg_loss, av_dist_loss, bv_dist_loss, fg_dist_loss
+
+        return loss_func
+
+    def forward(self, graph_batch: List):
+        """
+        The forward function.
+        :param graph_batch:
+        :return:
+        """
+        _, _, _, _, _, a_scope, b_scope, _, _, _ = graph_batch
+        a_scope = a_scope.data.cpu().numpy().tolist()
+
+        embeddings = self.grover(graph_batch)
+
+        if self.node_rank == 3:
+            av_task_pred_atom = self.av_task_atom(
+                embeddings["atom_from_atom"])  # if None: means not go through this fowward
+            av_task_pred_bond = self.av_task_bond(embeddings["atom_from_bond"])
+
+            bv_task_pred_atom = self.bv_task_atom(embeddings["bond_from_atom"])
+            bv_task_pred_bond = self.bv_task_bond(embeddings["bond_from_bond"])
+
+            fg_task_pred_all = self.fg_task_all(embeddings, a_scope, b_scope)
+
+            return {"av_task": (av_task_pred_atom, av_task_pred_bond),
+                    "bv_task": (bv_task_pred_atom, bv_task_pred_bond),
+                    "fg_task": fg_task_pred_all}
+        else:
+            return embeddings
+
+
+class GROVEREmbedding_for_pp(nn.Module):
+    """
+    The GROVER Embedding class. It contains the GTransEncoder.
+    This GTransEncoder can be replaced by any validate encoders.
+    """
+
+    def __init__(self, args: Namespace):
+        """
+        Initialize the GROVEREmbedding class.
+        :param args:
+        """
+        super(GROVEREmbedding_for_pp, self).__init__()
+        self.embedding_output_type = args.embedding_output_type
+        self.is_last_pipeline_stage = args.node_rank==3
+        edge_dim = get_bond_fdim() + get_atom_fdim()
+        node_dim = get_atom_fdim()
+        if not hasattr(args, "backbone"):
+            print("No backbone specified in args, use gtrans backbone.")
+            args.backbone = "gtrans"
+        if args.backbone == "gtrans" or args.backbone == "dualtrans":
+            # dualtrans is the old name.
+            self.encoders = GTransEncoder_for_pp(args,
+                                          hidden_size=args.hidden_size,
+                                          edge_fdim=edge_dim,
+                                          node_fdim=node_dim,
+                                          dropout=args.dropout,
+                                          activation=args.activation,
+                                          num_mt_block=args.num_mt_block,
+                                          num_attn_head=args.num_attn_head,
+                                          atom_emb_output=self.embedding_output_type,
+                                          bias=args.bias,
+                                          cuda=args.cuda)
+
+    def forward(self, graph_batch: List) -> Dict:
+        """
+        The forward function takes graph_batch as input and output a dict. The content of the dict is decided by
+        self.embedding_output_type.
+
+        :param graph_batch: the input graph batch generated by MolCollator.
+        :return: a dict containing the embedding results.
+        """
+        output = self.encoders(graph_batch)
+        if self.is_last_pipeline_stage == False:
+            return output
+
+        if self.embedding_output_type == 'atom':
+            return {"atom_from_atom": output[0], "atom_from_bond": output[1],
+                    "bond_from_atom": None, "bond_from_bond": None}  # atom_from_atom, atom_from_bond
+        elif self.embedding_output_type == 'bond':
+            return {"atom_from_atom": None, "atom_from_bond": None,
+                    "bond_from_atom": output[0], "bond_from_bond": output[1]}  # bond_from_atom, bond_from_bond
+        elif self.embedding_output_type == "both":
+            return {"atom_from_atom": output[0][0], "bond_from_atom": output[0][1],
+                    "atom_from_bond": output[1][0], "bond_from_bond": output[1][1]}

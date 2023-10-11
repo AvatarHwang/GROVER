@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from grover.data.dist_sampler import DistributedSampler
 from grover.data.groverdataset import get_data, split_data, GroverCollator, BatchMolDataset
 from grover.data.torchvocab import MolVocab
-from grover.model.models import GROVEREmbedding
+from grover.model.models import GROVEREmbedding, GROVEREmbedding_for_pp
 from grover.util.multi_gpu_wrapper import MultiGpuWrapper as mgw
 from grover.util.nn_utils import param_count
 from grover.util.utils import build_optimizer, build_lr_scheduler
@@ -123,7 +123,7 @@ def run_training(args, logger):
     # Define the distributed sampler. If using the single card, the sampler will be None.
     train_sampler = None
     test_sampler = None
-    shuffle = True
+    shuffle = False
     if args.enable_multi_gpu:
         # If not shuffle, the performance may decayed.
         train_sampler = DistributedSampler(
@@ -145,21 +145,28 @@ def run_training(args, logger):
         print("Pre-loaded test data: %d" % test_data.count_loaded_datapoints())
 
     # Build dataloader
+    #batch_size = args.micro_batch_size if args.pipeline_parallel else args.batch_size
+    batch_size = args.batch_size
     train_data_dl = DataLoader(train_data,
-                               batch_size=args.batch_size,
+                               batch_size=batch_size,
                                shuffle=shuffle,
                                num_workers=12,
                                sampler=train_sampler,
-                               collate_fn=mol_collator)
+                               collate_fn=mol_collator,
+                               drop_last=True)
     test_data_dl = DataLoader(test_data,
-                              batch_size=args.batch_size,
+                              batch_size=1,
                               shuffle=shuffle,
                               num_workers=10,
                               sampler=test_sampler,
-                              collate_fn=mol_collator)
+                              collate_fn=mol_collator,
+                              drop_last=True)
 
     # Build the embedding model.
-    grover_model = GROVEREmbedding(args)
+    if args.pipeline_parallel:
+        grover_model = GROVEREmbedding_for_pp(args)
+    else:
+        grover_model = GROVEREmbedding(args)
 
     #  Build the trainer.
     trainer = GROVERTrainer(args=args,
@@ -176,7 +183,10 @@ def run_training(args, logger):
                             enable_multi_gpu=args.enable_multi_gpu)
 
     # Restore the interrupted training.
-    model_dir = os.path.join(args.save_dir, "model")
+    if args.pipeline_parallel:
+        model_dir = os.path.join(args.save_dir, "model-%d" % args.node_rank)
+    else:
+        model_dir = os.path.join(args.save_dir, "model-4-layer")
     resume_from_epoch = 0
     resume_scheduler_step = 0
     if master_worker:
@@ -212,30 +222,46 @@ def run_training(args, logger):
         s_time = time.time()
         _, train_loss, _ = trainer.train(epoch)
         t_time = time.time() - s_time
+        print(f"\nStart validation at epoch {epoch}")
         s_time = time.time()
         _, val_loss, detailed_loss_val = trainer.test(epoch)
         val_av_loss, val_bv_loss, val_fg_loss, _, _, _ = detailed_loss_val
         v_time = time.time() - s_time
 
         # print information.
-        if master_worker:
-            print('Epoch: {:04d}'.format(epoch),
-                  'loss_train: {:.6f}'.format(train_loss),
-                  'loss_val: {:.6f}'.format(val_loss),
-                  'loss_val_av: {:.6f}'.format(val_av_loss),
-                  'loss_val_bv: {:.6f}'.format(val_bv_loss),
-                  'loss_val_fg: {:.6f}'.format(val_fg_loss),
-                  'cur_lr: {:.5f}'.format(trainer.scheduler.get_lr()[0]),
-                  't_time: {:.4f}s'.format(t_time),
-                  'v_time: {:.4f}s'.format(v_time),
-                  'd_time: {:.4f}s'.format(d_time), flush=True)
+        if args.pipeline_parallel:
+            if args.node_rank==3:
+                print('Epoch: {:04d}'.format(epoch),
+                    'loss_train: {:.6f}'.format(train_loss),
+                    'loss_val: {:.6f}'.format(val_loss),
+                    'loss_val_av: {:.6f}'.format(val_av_loss),
+                    'loss_val_bv: {:.6f}'.format(val_bv_loss),
+                    'loss_val_fg: {:.6f}'.format(val_fg_loss),
+                    'cur_lr: {:.5f}'.format(trainer.scheduler.get_lr()[0]),
+                    't_time: {:.4f}s'.format(t_time),
+                    'v_time: {:.4f}s'.format(v_time),
+                    'd_time: {:.4f}s'.format(d_time), flush=True)
+                    
+        else:
+            if master_worker:
+                print('Epoch: {:04d}'.format(epoch),
+                    'loss_train: {:.6f}'.format(train_loss),
+                    'loss_val: {:.6f}'.format(val_loss),
+                    'loss_val_av: {:.6f}'.format(val_av_loss),
+                    'loss_val_bv: {:.6f}'.format(val_bv_loss),
+                    'loss_val_fg: {:.6f}'.format(val_fg_loss),
+                    'cur_lr: {:.5f}'.format(trainer.scheduler.get_lr()[0]),
+                    't_time: {:.4f}s'.format(t_time),
+                    'v_time: {:.4f}s'.format(v_time),
+                    'd_time: {:.4f}s'.format(d_time), flush=True)
 
             if epoch % args.save_interval == 0:
-                trainer.save(epoch, model_dir)
+                #trainer.save(epoch, model_dir)
+                pass
 
-
-            trainer.save_tmp(epoch, model_dir, rank)
+            #trainer.save_tmp(epoch, model_dir, rank)
 
     # Only save final version.
     if master_worker:
-        trainer.save(args.epochs, model_dir, "")
+        #trainer.save(args.epochs, model_dir, "")
+        pass

@@ -152,6 +152,7 @@ class BatchMolDataset(Dataset):
     def __getitem__(self, idx) -> Union[MoleculeDatapoint, List[MoleculeDatapoint]]:
         # print(idx)
         dp_idx = int(idx / self.sample_per_file)
+        dp_idx = 0
         real_idx = idx % self.sample_per_file
         return self.data[dp_idx][real_idx]
 
@@ -237,7 +238,7 @@ class GroverCollator(object):
 
         atom_vocab_label = torch.Tensor(self.atom_random_mask(smiles_batch)).long()
         bond_vocab_label = torch.Tensor(self.bond_random_mask(smiles_batch)).long()
-        fgroup_label = torch.Tensor([d.features for d in batch]).float()
+        fgroup_label = torch.Tensor(np.array([d.features for d in batch])).float()
         # may be some mask here
         res = {"graph_input": batchgraph,
                "targets": {"av_task": atom_vocab_label,

@@ -298,6 +298,17 @@ def add_pretrain_args(parser: ArgumentParser):
     parser.add_argument('--final_lr', type=float, default=1e-4,
                         help='Final learning rate')
     parser.add_argument('--bond_drop_rate', type=float, default=0, help='Drop out bond in molecular')
+    parser.add_argument('--data_parallel', action='store_true', default=False,
+                        help='Enable data parallel training')
+    parser.add_argument('--world_size', type=int, default=1)
+    parser.add_argument('--task_parallel', action='store_true', default=False,
+                        help='Enable task model parallel training')
+    parser.add_argument('--pipeline_parallel', action='store_true', default=False)
+    parser.add_argument('--num_micro_batch', type=int, default=1)
+    parser.add_argument('--node_rank', type=int, default=0)
+    parser.add_argument('--micro_batch_size', type=int, default=32)
+    parser.add_argument('--model_parallel_size', type=int, default=1)
+    parser.add_argument('--data_parallel_size', type=int, default=1)
 
 
 

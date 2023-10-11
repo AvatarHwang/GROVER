@@ -24,8 +24,11 @@ def setup(seed, args):
     torch.backends.cudnn.deterministic = True
 
     if args.data_parallel or args.task_parallel or args.pipeline_parallel:
+        print("init process group")
         world_rank = int(os.environ['RANK'])
+        print("world rank: ", world_rank)
         dist.init_process_group(backend='nccl', world_size=args.world_size, rank=world_rank)
+        print("init process group done")
 
 if __name__ == '__main__':
     args = parse_args()

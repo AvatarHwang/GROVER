@@ -16,6 +16,7 @@ from grover.data import StandardScaler
 from grover.util.utils import get_data, get_data_from_smiles, create_logger, load_args, get_task_names, tqdm, \
     load_checkpoint, load_scalars
 
+from task.dapple import forward_backward_step
 
 def predict(model: nn.Module,
             data: MoleculeDataset,
@@ -314,3 +315,94 @@ def evaluate(model: nn.Module,
     )
 
     return results, loss_avg
+
+
+def evaluate_for_pp(model: nn.Module,
+             data: MoleculeDataset,
+             num_tasks: int,
+             metric_func,
+             loss_func,
+             batch_size: int,
+             dataset_type: str,
+             args: Namespace,
+             shared_dict,
+             scaler: StandardScaler = None,
+             logger = None) -> List[float]:
+    """
+    Evaluates an ensemble of models on a dataset.
+
+    :param model: A model.
+    :param data: A MoleculeDataset.
+    :param num_tasks: Number of tasks.
+    :param metric_func: Metric function which takes in a list of targets and a list of predictions.
+    :param batch_size: Batch size.
+    :param dataset_type: Dataset type.
+    :param scaler: A StandardScaler object fit on the training targets.
+    :param logger: Logger.
+    :return: A list with the score for each task based on `metric_func`.
+    """
+    loss_avg = predict_for_pp(
+        model=model,
+        data=data,
+        loss_func=loss_func,
+        batch_size=batch_size,
+        scaler=scaler,
+        shared_dict=shared_dict,
+        logger=logger,
+        args=args
+    )
+
+    return loss_avg
+
+
+def predict_for_pp(model: nn.Module,
+            data: MoleculeDataset,
+            args: Namespace,
+            batch_size: int,
+            loss_func,
+            logger,
+            shared_dict,
+            scaler: StandardScaler = None
+            ) -> List[List[float]]:
+    """
+    Makes predictions on a dataset using an ensemble of models.
+
+    :param model: A model.
+    :param data: A MoleculeDataset.
+    :param batch_size: Batch size.
+    :param scaler: A StandardScaler object fit on the training targets.
+    :return: A list of lists of predictions. The outer list is examples
+    while the inner list is tasks.
+    """
+    # debug = logger.debug if logger is not None else print
+    model.eval()
+    args.bond_drop_rate = 0
+    preds = []
+
+    # num_iters, iter_step = len(data), batch_size
+    loss_sum, iter_count = 0, 0
+
+    mol_collator = MolCollator(args=args, shared_dict=shared_dict)
+    # mol_dataset = MoleculeDataset(data)
+
+    num_workers = 4
+    mol_loader = DataLoader(data, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                            collate_fn=mol_collator)
+    iteration=-1
+    for _, item in enumerate(mol_loader):
+        iteration+=1
+        if iteration%args.num_micro_batch==0:
+            # Setup micro batches
+            micro_batches = []
+            micro_batches.append(item)
+            for i in range(1, args.num_micro_batch):
+                micro_batches.append(next(enumerate(mol_loader))[1])
+
+            with torch.no_grad():
+                forward_only = True
+                loss = forward_backward_step(model, micro_batches, args, forward_only)
+                iter_count += 1
+        else:
+            pass
+
+    return loss

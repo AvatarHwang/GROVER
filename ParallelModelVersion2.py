@@ -887,7 +887,8 @@ class GroverFinetuneTask_for_PP(nn.Module):
                 if self.classification:
                     atom_ffn_output = self.sigmoid(atom_ffn_output)
                     bond_ffn_output = self.sigmoid(bond_ffn_output)
-                output = (atom_ffn_output + bond_ffn_output) / 2
+                # output = (atom_ffn_output + bond_ffn_output) / 2
+                output = (atom_ffn_output, bond_ffn_output)
 
             return output
         else:
