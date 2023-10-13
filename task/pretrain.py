@@ -145,19 +145,18 @@ def run_training(args, logger):
         print("Pre-loaded test data: %d" % test_data.count_loaded_datapoints())
 
     # Build dataloader
-    #batch_size = args.micro_batch_size if args.pipeline_parallel else args.batch_size
-    batch_size = args.batch_size
+    batch_size = args.micro_batch_size if args.pipeline_parallel else args.batch_size
     train_data_dl = DataLoader(train_data,
                                batch_size=batch_size,
                                shuffle=shuffle,
-                               num_workers=12,
+                               num_workers=6,
                                sampler=train_sampler,
                                collate_fn=mol_collator,
                                drop_last=True)
     test_data_dl = DataLoader(test_data,
-                              batch_size=1,
+                              batch_size=32,
                               shuffle=shuffle,
-                              num_workers=10,
+                              num_workers=6,
                               sampler=test_sampler,
                               collate_fn=mol_collator,
                               drop_last=True)
@@ -206,6 +205,7 @@ def run_training(args, logger):
         print("Total parameters: %d" % param_count(trainer.grover))
 
     # Perform training.
+    train_losses, val_losses, t_times = [], [], []
     for epoch in range(resume_from_epoch + 1, args.epochs):
         s_time = time.time()
 
@@ -221,11 +221,13 @@ def run_training(args, logger):
         # perform training and validation.
         s_time = time.time()
         _, train_loss, _ = trainer.train(epoch)
+        train_losses.append(train_loss)
         t_time = time.time() - s_time
-        print(f"\nStart validation at epoch {epoch}")
+        t_times.append(t_time)
         s_time = time.time()
         _, val_loss, detailed_loss_val = trainer.test(epoch)
         val_av_loss, val_bv_loss, val_fg_loss, _, _, _ = detailed_loss_val
+        val_losses.append(val_loss)
         v_time = time.time() - s_time
 
         # print information.
@@ -241,6 +243,8 @@ def run_training(args, logger):
                     't_time: {:.4f}s'.format(t_time),
                     'v_time: {:.4f}s'.format(v_time),
                     'd_time: {:.4f}s'.format(d_time), flush=True)
+                print(f"all losses.\n train_losses: {train_losses}\n val_losses: {val_losses}")
+                print(f"t_times: {t_times}\n\n")
                     
         else:
             if master_worker:
@@ -254,6 +258,8 @@ def run_training(args, logger):
                     't_time: {:.4f}s'.format(t_time),
                     'v_time: {:.4f}s'.format(v_time),
                     'd_time: {:.4f}s'.format(d_time), flush=True)
+                print(f"train_losses: {train_losses}\n val_losses: {val_losses}")
+                print(f"t_times: {t_times}\n\n")
 
             if epoch % args.save_interval == 0:
                 #trainer.save(epoch, model_dir)

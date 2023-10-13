@@ -34,15 +34,14 @@ def forward_backward_step(model, micro_batches, args, forward_only, loss_func):
 
     f_atoms_size = [micro_batches[i]["graph_input"][0].size(0) for i in range(len(micro_batches))]
     f_bonds_size = [micro_batches[i]["graph_input"][1].size(0) for i in range(len(micro_batches))]
-    # print(f" f_atoms_size: {f_atoms_size}")
-    # print(f" f_bonds_size: {f_bonds_size}")
+
+    target_lst = [micro_batches[i]["targets"] for i in range(len(micro_batches))]
 
     world_rank = dist.get_rank()
 
     input_batches, output_batches = [], []
     if not forward_only:
         input_batches, output_batches = [], []
-    target_lst = []
     losses = []
     atom_output_lst, bond_output_lst = [], []
 
@@ -51,8 +50,8 @@ def forward_backward_step(model, micro_batches, args, forward_only, loss_func):
     for i in range(num_warmup_microbatches):
         micro_batch = micro_batches[i]
         batch = micro_batch["graph_input"]
-        targets = micro_batch["targets"]
-        target_lst.append(targets)
+        #targets = micro_batch["targets"]
+        #target_lst.append(targets)
         # targets["av_task"] = targets["av_task"].cuda()
         # targets["bv_task"] = targets["bv_task"].cuda()
         # targets["fg_task"] = targets["fg_task"].cuda()
@@ -108,15 +107,15 @@ def forward_backward_step(model, micro_batches, args, forward_only, loss_func):
             f_atoms_feature = None
             f_bonds_feature = None
         micro_batch = micro_batches[num_warmup_microbatches]
-        targets = micro_batch["targets"]
+        # targets = micro_batch["targets"]
         micro_batch = micro_batch["graph_input"]
         input_batch = (micro_batch[0], micro_batch[1], micro_batch[2], micro_batch[3], micro_batch[4], micro_batch[5], micro_batch[6], micro_batch[7], f_atoms_feature, f_bonds_feature)
         input_batches.append(input_batch)
-        if args.node_rank == 3:
-            targets["av_task"] = targets["av_task"].cuda()
-            targets["bv_task"] = targets["bv_task"].cuda()
-            targets["fg_task"] = targets["fg_task"].cuda()
-            target_lst.append(targets)
+        # if args.node_rank == 3:
+        #     targets["av_task"] = targets["av_task"].cuda()
+        #     targets["bv_task"] = targets["bv_task"].cuda()
+        #     targets["fg_task"] = targets["fg_task"].cuda()
+        #     target_lst.append(targets)
 
     # 1F1B
     # print("\nStart 1F1B")
@@ -137,16 +136,21 @@ def forward_backward_step(model, micro_batches, args, forward_only, loss_func):
         if forward_only:
             # Send FW
             if args.node_rank != args.model_parallel_size - 1:
-                print(f"send fw: {atom_output.size()} at line 2047 to {world_rank+args.data_parallel_size}")
+                # print(f"send fw: {atom_output.size()} at line 2047 to {world_rank+args.data_parallel_size}")
                 dist.send(tensor=atom_output.cuda(), dst=world_rank+args.data_parallel_size)
                 dist.send(tensor=bond_output.cuda(), dst=world_rank+args.data_parallel_size)
             else:
-                loss = loss_func(loss, targets)
+                target = target_lst[0]
+                target["av_task"] = target["av_task"].cuda()
+                target["bv_task"] = target["bv_task"].cuda()
+                target["fg_task"] = target["fg_task"].cuda()
+                loss = loss_func(loss, target)
+                target_lst = target_lst[1:]
                 losses.append(loss)
             if not last_iteration:
                 # Recv forward
                 if args.node_rank != 0:
-                    print(f"recv fw: {f_atoms_feature.size()} at line 2052 from {world_rank-args.data_parallel_size}")
+                    # print(f"recv fw: {f_atoms_feature.size()} at line 2052 from {world_rank-args.data_parallel_size}")
                     f_atoms_feature = torch.empty(f_atoms_size[i + num_warmup_microbatches + 1], args.hidden_size).cuda()
                     f_bonds_feature = torch.empty(f_bonds_size[i + num_warmup_microbatches + 1], args.hidden_size).cuda()
                     dist.recv(tensor=f_atoms_feature.cuda(), src=world_rank-args.data_parallel_size)
@@ -156,6 +160,7 @@ def forward_backward_step(model, micro_batches, args, forward_only, loss_func):
                 targets["av_task"] = targets["av_task"].cuda()
                 targets["bv_task"] = targets["bv_task"].cuda()
                 targets["fg_task"] = targets["fg_task"].cuda()
+                # target_lst.append(targets)
                 micro_batch = micro_batch["graph_input"]
                 input_batch = (micro_batch[0], micro_batch[1], micro_batch[2], micro_batch[3], micro_batch[4], micro_batch[5], micro_batch[6], micro_batch[7], f_atoms_feature, f_bonds_feature)
         else:
@@ -183,7 +188,12 @@ def forward_backward_step(model, micro_batches, args, forward_only, loss_func):
                 atom_output_lst = atom_output_lst[1:]
                 bond_output_lst = bond_output_lst[1:]
             else: # if last rank
-                loss = loss_func(loss, targets)
+                target = target_lst[0]
+                target["av_task"] = target["av_task"].cuda()
+                target["bv_task"] = target["bv_task"].cuda()
+                target["fg_task"] = target["fg_task"].cuda()
+                loss = loss_func(loss, target)
+                target_lst = target_lst[1:]
                 losses.append(loss)
                 loss, _, _, _, _, _, _ = loss
                 loss.backward(retain_graph=True)
@@ -218,14 +228,15 @@ def forward_backward_step(model, micro_batches, args, forward_only, loss_func):
                     f_atoms_feature = None
                     f_bonds_feature = None
                 micro_batch = micro_batches[i + num_warmup_microbatches + 1]
-                targets = micro_batch["targets"]
+                # targets = micro_batch["targets"]
                 micro_batch = micro_batch["graph_input"]
                 input_batch = (micro_batch[0], micro_batch[1], micro_batch[2], micro_batch[3], micro_batch[4], micro_batch[5], micro_batch[6], micro_batch[7], f_atoms_feature, f_bonds_feature)
                 input_batches.append(input_batch)
-                if args.node_rank == 3:
-                    targets["av_task"] = targets["av_task"].cuda()
-                    targets["bv_task"] = targets["bv_task"].cuda()
-                    targets["fg_task"] = targets["fg_task"].cuda()
+                # if args.node_rank == 3:
+                #     targets["av_task"] = targets["av_task"].cuda()
+                #     targets["bv_task"] = targets["bv_task"].cuda()
+                #     targets["fg_task"] = targets["fg_task"].cuda()
+                #     target_lst.append(targets)
                     
     
     # cooldown phase
@@ -254,7 +265,12 @@ def forward_backward_step(model, micro_batches, args, forward_only, loss_func):
                 bond_output_lst = bond_output_lst[1:]
             else:
                 loss = output_batch
-                loss = loss_func(loss, targets)
+                target = target_lst[0]
+                target["av_task"] = target["av_task"].cuda()
+                target["bv_task"] = target["bv_task"].cuda()
+                target["fg_task"] = target["fg_task"].cuda()
+                loss = loss_func(loss, target)
+                target_lst = target_lst[1:]
                 losses.append(loss)
                 loss, _, _, _, _, _, _ = loss
                 loss.backward(retain_graph=True)
