@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from grover.model.models import GroverTask, GroverTask_for_pp
 from grover.util.multi_gpu_wrapper import MultiGpuWrapper as mgw
 
-from task.dapple import forward_backward_step
+from task.dapple import forward_backward_step, forward_backward_step_for_max_pipeline
 
 import copy
 
@@ -172,8 +172,11 @@ class GROVERTrainer:
                 # if len(micro_batches)<self.args.num_micro_batch:
                 #     break
                 forward_only = False if train else True
-                losses = forward_backward_step(self.model, micro_batches, self.args, forward_only, loss_func)
-                if self.args.node_rank == 3:
+                if self.args.max_pipeline:
+                    losses = forward_backward_step_for_max_pipeline(self.model, micro_batches, self.args, forward_only, loss_func)
+                else:
+                    losses = forward_backward_step(self.model, micro_batches, self.args, forward_only, loss_func)
+                if self.args.node_rank == self.args.model_parallel_size-1:
                     if losses != []:
                         for losse in losses:
                             loss, av_loss, bv_loss, fg_loss, av_dist_loss, bv_dist_loss, fg_dist_loss = losse
@@ -203,7 +206,7 @@ class GROVERTrainer:
 
                 # p.step()
 
-            if self.args.node_rank==3:
+            if self.args.node_rank==self.args.model_parallel_size-1:
                 if cum_iter_count != 0:
                     cum_loss_sum /= cum_iter_count
                     av_loss_sum /= cum_iter_count

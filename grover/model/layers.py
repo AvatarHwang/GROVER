@@ -955,11 +955,18 @@ class GTransEncoder_for_pp(nn.Module):
         self.cuda = cuda
         self.bias = bias
         self.res_connection = res_connection
+
+        self.max_pipeline = args.max_pipeline
+
         self.edge_blocks = nn.ModuleList()
         self.node_blocks = nn.ModuleList()
 
         self.is_first_pipeline_stage = args.node_rank==0
-        self.is_last_pipeline_stage = args.node_rank==3
+        self.is_last_pipeline_stage = args.node_rank==args.model_parallel_size-1
+        self.node_rank = args.node_rank
+        if self.max_pipeline:
+            self.is_first_pipeline_stage = True if args.node_rank == 0 or args.node_rank == 4 else False
+            self.is_last_pipeline_stage = True if args.node_rank == 3 or args.node_rank == 7 else False
 
         edge_input_dim = edge_fdim
         node_input_dim = node_fdim
@@ -969,61 +976,114 @@ class GTransEncoder_for_pp(nn.Module):
         if self.is_first_pipeline_stage == False:
             edge_input_dim_i = self.hidden_size
             node_input_dim_i = self.hidden_size
-        self.edge_blocks.append(MTBlock(args=args,
-                                        num_attn_head=num_attn_head,
-                                        input_dim=edge_input_dim_i,
-                                        hidden_size=self.hidden_size,
-                                        activation=activation,
-                                        dropout=dropout,
-                                        bias=self.bias,
-                                        atom_messages=False,
-                                        cuda=cuda))
-        self.node_blocks.append(MTBlock(args=args,
-                                        num_attn_head=num_attn_head,
-                                        input_dim=node_input_dim_i,
-                                        hidden_size=self.hidden_size,
-                                        activation=activation,
-                                        dropout=dropout,
-                                        bias=self.bias,
-                                        atom_messages=True,
-                                        cuda=cuda))
+        if not self.max_pipeline:
+            self.edge_blocks.append(MTBlock(args=args,
+                                            num_attn_head=num_attn_head,
+                                            input_dim=edge_input_dim_i,
+                                            hidden_size=self.hidden_size,
+                                            activation=activation,
+                                            dropout=dropout,
+                                            bias=self.bias,
+                                            atom_messages=False,
+                                            cuda=cuda))
+            self.node_blocks.append(MTBlock(args=args,
+                                            num_attn_head=num_attn_head,
+                                            input_dim=node_input_dim_i,
+                                            hidden_size=self.hidden_size,
+                                            activation=activation,
+                                            dropout=dropout,
+                                            bias=self.bias,
+                                            atom_messages=True,
+                                            cuda=cuda))
+        else:
+            if args.node_rank<4:
+                self.node_blocks.append(MTBlock(args=args,
+                                            num_attn_head=num_attn_head,
+                                            input_dim=node_input_dim_i,
+                                            hidden_size=self.hidden_size,
+                                            activation=activation,
+                                            dropout=dropout,
+                                            bias=self.bias,
+                                            atom_messages=True,
+                                            cuda=cuda))
+            else:
+                self.edge_blocks.append(MTBlock(args=args,
+                                                num_attn_head=num_attn_head,
+                                                input_dim=edge_input_dim_i,
+                                                hidden_size=self.hidden_size,
+                                                activation=activation,
+                                                dropout=dropout,
+                                                bias=self.bias,
+                                                atom_messages=True,
+                                                cuda=cuda))
 
         if self.is_last_pipeline_stage:
-            self.atom_emb_output = atom_emb_output
+            if not self.max_pipeline:
+                self.atom_emb_output = atom_emb_output
+                self.ffn_atom_from_atom = PositionwiseFeedForward(self.hidden_size + node_fdim,
+                                                                self.hidden_size * 4,
+                                                                activation=self.activation,
+                                                                dropout=self.dropout,
+                                                                d_out=self.hidden_size)
+                self.ffn_atom_from_bond = PositionwiseFeedForward(self.hidden_size + node_fdim,
+                                                                self.hidden_size * 4,
+                                                                activation=self.activation,
+                                                                dropout=self.dropout,
+                                                                d_out=self.hidden_size)
+                self.ffn_bond_from_atom = PositionwiseFeedForward(self.hidden_size + edge_fdim,
+                                                                self.hidden_size * 4,
+                                                                activation=self.activation,
+                                                                dropout=self.dropout,
+                                                                d_out=self.hidden_size)
+                self.ffn_bond_from_bond = PositionwiseFeedForward(self.hidden_size + edge_fdim,
+                                                                self.hidden_size * 4,
+                                                                activation=self.activation,
+                                                                dropout=self.dropout,
+                                                                d_out=self.hidden_size)
+                self.atom_from_atom_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
+                self.atom_from_bond_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
+                self.bond_from_atom_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
+                self.bond_from_bond_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
+                self.act_func_node = get_activation_function(self.activation)
+                self.act_func_edge = get_activation_function(self.activation)
+                self.dropout_layer = nn.Dropout(p=args.dropout)
+                
+            else:
+                if args.node_rank<4:
+                    self.atom_emb_output = atom_emb_output
+                    self.ffn_atom_from_atom = PositionwiseFeedForward(self.hidden_size + node_fdim,
+                                                                    self.hidden_size * 4,
+                                                                    activation=self.activation,
+                                                                    dropout=self.dropout,
+                                                                    d_out=self.hidden_size)
+                    self.ffn_bond_from_atom = PositionwiseFeedForward(self.hidden_size + edge_fdim,
+                                                                self.hidden_size * 4,
+                                                                activation=self.activation,
+                                                                dropout=self.dropout,
+                                                                d_out=self.hidden_size)
+                    self.atom_from_atom_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
+                    self.bond_from_atom_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
+                    self.act_func_node = get_activation_function(self.activation)
+                    self.act_func_edge = get_activation_function(self.activation)
+                    self.dropout_layer = nn.Dropout(p=args.dropout)
+                else:
+                    self.atom_emb_output = atom_emb_output
+                    self.ffn_atom_from_bond = PositionwiseFeedForward(self.hidden_size + node_fdim,
+                                                                    self.hidden_size * 4,
+                                                                    activation=self.activation,
+                                                                    dropout=self.dropout,
+                                                                    d_out=self.hidden_size)
+                    self.ffn_bond_from_bond = PositionwiseFeedForward(self.hidden_size + edge_fdim,
+                                                                self.hidden_size * 4,
+                                                                activation=self.activation,
+                                                                dropout=self.dropout,
+                                                                d_out=self.hidden_size)
+                    self.atom_from_bond_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
+                    self.bond_from_bond_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
+                    self.act_func_node = get_activation_function(self.activation)
+                    self.act_func_edge = get_activation_function(self.activation)
+                    self.dropout_layer = nn.Dropout(p=args.dropout)
 
-            self.ffn_atom_from_atom = PositionwiseFeedForward(self.hidden_size + node_fdim,
-                                                            self.hidden_size * 4,
-                                                            activation=self.activation,
-                                                            dropout=self.dropout,
-                                                            d_out=self.hidden_size)
-
-            self.ffn_atom_from_bond = PositionwiseFeedForward(self.hidden_size + node_fdim,
-                                                            self.hidden_size * 4,
-                                                            activation=self.activation,
-                                                            dropout=self.dropout,
-                                                            d_out=self.hidden_size)
-
-            self.ffn_bond_from_atom = PositionwiseFeedForward(self.hidden_size + edge_fdim,
-                                                            self.hidden_size * 4,
-                                                            activation=self.activation,
-                                                            dropout=self.dropout,
-                                                            d_out=self.hidden_size)
-
-            self.ffn_bond_from_bond = PositionwiseFeedForward(self.hidden_size + edge_fdim,
-                                                            self.hidden_size * 4,
-                                                            activation=self.activation,
-                                                            dropout=self.dropout,
-                                                            d_out=self.hidden_size)
-
-            self.atom_from_atom_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
-            self.atom_from_bond_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
-            self.bond_from_atom_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
-            self.bond_from_bond_sublayer = SublayerConnection(size=self.hidden_size, dropout=self.dropout)
-
-            self.act_func_node = get_activation_function(self.activation)
-            self.act_func_edge = get_activation_function(self.activation)
-
-            self.dropout_layer = nn.Dropout(p=args.dropout)
 
     def pointwise_feed_forward_to_atom_embedding(self, emb_output, atom_fea, index, ffn_layer):
         """
@@ -1091,32 +1151,53 @@ class GTransEncoder_for_pp(nn.Module):
         :param b2revb: mapping from bond index to the index of the reverse bond.
         :return:
         """
+        if not self.max_pipeline:
+            if to_atom:
+                # atom input to atom output
+                atomwise_input, _ = self.pointwise_feed_forward_to_atom_embedding(atomwise_input, original_f_atoms, a2a,
+                                                                                self.ffn_atom_from_atom)
+                atom_in_atom_out = self.atom_from_atom_sublayer(None, atomwise_input)
+                # bond to atom
+                bondwise_input, _ = self.pointwise_feed_forward_to_atom_embedding(bondwise_input, original_f_atoms, a2b,
+                                                                                self.ffn_atom_from_bond)
+                bond_in_atom_out = self.atom_from_bond_sublayer(None, bondwise_input)
+                return atom_in_atom_out, bond_in_atom_out
+            else:  # to bond embeddings
 
-        if to_atom:
-            # atom input to atom output
-            atomwise_input, _ = self.pointwise_feed_forward_to_atom_embedding(atomwise_input, original_f_atoms, a2a,
-                                                                              self.ffn_atom_from_atom)
-            atom_in_atom_out = self.atom_from_atom_sublayer(None, atomwise_input)
-            # bond to atom
-            bondwise_input, _ = self.pointwise_feed_forward_to_atom_embedding(bondwise_input, original_f_atoms, a2b,
-                                                                              self.ffn_atom_from_bond)
-            bond_in_atom_out = self.atom_from_bond_sublayer(None, bondwise_input)
-            return atom_in_atom_out, bond_in_atom_out
-        else:  # to bond embeddings
-
-            # atom input to bond output
-            atom_list_for_bond = torch.cat([b2a.unsqueeze(dim=1), a2a[b2a]], dim=1)
-            atomwise_input, _ = self.pointwise_feed_forward_to_bond_embedding(atomwise_input, original_f_bonds,
-                                                                              atom_list_for_bond,
-                                                                              b2a[b2revb], self.ffn_bond_from_atom)
-            atom_in_bond_out = self.bond_from_atom_sublayer(None, atomwise_input)
-            # bond input to bond output
-            bond_list_for_bond = a2b[b2a]
-            bondwise_input, _ = self.pointwise_feed_forward_to_bond_embedding(bondwise_input, original_f_bonds,
-                                                                              bond_list_for_bond,
-                                                                              b2revb, self.ffn_bond_from_bond)
-            bond_in_bond_out = self.bond_from_bond_sublayer(None, bondwise_input)
-            return atom_in_bond_out, bond_in_bond_out
+                # atom input to bond output
+                atom_list_for_bond = torch.cat([b2a.unsqueeze(dim=1), a2a[b2a]], dim=1)
+                atomwise_input, _ = self.pointwise_feed_forward_to_bond_embedding(atomwise_input, original_f_bonds,
+                                                                                atom_list_for_bond,
+                                                                                b2a[b2revb], self.ffn_bond_from_atom)
+                atom_in_bond_out = self.bond_from_atom_sublayer(None, atomwise_input)
+                # bond input to bond output
+                bond_list_for_bond = a2b[b2a]
+                bondwise_input, _ = self.pointwise_feed_forward_to_bond_embedding(bondwise_input, original_f_bonds,
+                                                                                bond_list_for_bond,
+                                                                                b2revb, self.ffn_bond_from_bond)
+                bond_in_bond_out = self.bond_from_bond_sublayer(None, bondwise_input)
+                return atom_in_bond_out, bond_in_bond_out
+        else:
+            if to_atom: # from atom
+                atomwise_input, _ = self.pointwise_feed_forward_to_atom_embedding(atomwise_input, original_f_atoms, a2a,
+                                                                                self.ffn_atom_from_atom)
+                atom_list_for_bond = torch.cat([b2a.unsqueeze(dim=1), a2a[b2a]], dim=1)
+                atomwise_input, _ = self.pointwise_feed_forward_to_bond_embedding(atomwise_input, original_f_bonds,
+                                                                                atom_list_for_bond,
+                                                                                b2a[b2revb], self.ffn_bond_from_atom)
+                atom_in_bond_out = self.bond_from_atom_sublayer(None, atomwise_input)
+                atom_in_atom_out = self.atom_from_atom_sublayer(None, atomwise_input)
+                return atom_in_atom_out, atom_in_bond_out
+            else: # from bond
+                bondwise_input, _ = self.pointwise_feed_forward_to_atom_embedding(bondwise_input, original_f_atoms, a2b,
+                                                                                self.ffn_atom_from_bond)
+                bond_list_for_bond = a2b[b2a]
+                bondwise_input, _ = self.pointwise_feed_forward_to_bond_embedding(bondwise_input, original_f_bonds,
+                                                                                bond_list_for_bond,
+                                                                                b2revb, self.ffn_bond_from_bond)
+                bond_in_bond_out = self.bond_from_bond_sublayer(None, bondwise_input)
+                bond_in_atom_out = self.atom_from_bond_sublayer(None, bondwise_input)
+                return bond_in_atom_out, bond_in_bond_out
 
     def forward(self, batch, features_batch = None):
         
@@ -1136,59 +1217,123 @@ class GTransEncoder_for_pp(nn.Module):
         original_f_atoms, original_f_bonds = f_atoms, f_bonds
 
         # Note: features_batch is not used here.
-        edge_batch, features_batch = self.edge_blocks[0](edge_batch, features_batch)
-        node_batch, features_batch = self.node_blocks[0](node_batch, features_batch)
-        
-        atom_output, _, _, _, _, _, _, _ = node_batch  # atom hidden states
-        _, bond_output, _, _, _, _, _, _ = edge_batch  # bond hidden states
+        if not self.max_pipeline:
+            edge_batch, features_batch = self.edge_blocks[0](edge_batch, features_batch)
+            node_batch, features_batch = self.node_blocks[0](node_batch, features_batch)      
+            atom_output, _, _, _, _, _, _, _ = node_batch  # atom hidden states
+            _, bond_output, _, _, _, _, _, _ = edge_batch  # bond hidden states
 
-        if self.is_last_pipeline_stage:
-            if self.atom_emb_output is None:
-                # output the embedding from multi-head attention directly.
+            if self.is_last_pipeline_stage:
+                if self.atom_emb_output is None:
+                    # output the embedding from multi-head attention directly.
+                    return atom_output, bond_output
+
+                if self.atom_emb_output == 'atom':
+                    return self.atom_bond_transform(to_atom=True,  # False: to bond
+                                                    atomwise_input=atom_output,
+                                                    bondwise_input=bond_output,
+                                                    original_f_atoms=original_f_atoms,
+                                                    original_f_bonds=original_f_bonds,
+                                                    a2a=a2a,
+                                                    a2b=a2b,
+                                                    b2a=b2a,
+                                                    b2revb=b2revb)
+                elif self.atom_emb_output == 'bond':
+                    return self.atom_bond_transform(to_atom=False,  # False: to bond
+                                                    atomwise_input=atom_output,
+                                                    bondwise_input=bond_output,
+                                                    original_f_atoms=original_f_atoms,
+                                                    original_f_bonds=original_f_bonds,
+                                                    a2a=a2a,
+                                                    a2b=a2b,
+                                                    b2a=b2a,
+                                                    b2revb=b2revb)
+                else:  # 'both'
+                    atom_embeddings = self.atom_bond_transform(to_atom=True,  # False: to bond
+                                                            atomwise_input=atom_output,
+                                                            bondwise_input=bond_output,
+                                                            original_f_atoms=original_f_atoms,
+                                                            original_f_bonds=original_f_bonds,
+                                                            a2a=a2a,
+                                                            a2b=a2b,
+                                                            b2a=b2a,
+                                                            b2revb=b2revb)
+
+                    bond_embeddings = self.atom_bond_transform(to_atom=False,  # False: to bond
+                                                            atomwise_input=atom_output,
+                                                            bondwise_input=bond_output,
+                                                            original_f_atoms=original_f_atoms,
+                                                            original_f_bonds=original_f_bonds,
+                                                            a2a=a2a,
+                                                            a2b=a2b,
+                                                            b2a=b2a,
+                                                            b2revb=b2revb)
+                    # Notice: need to be consistent with output format of DualMPNN encoder
+                    return ((atom_embeddings[0], bond_embeddings[0]),
+                            (atom_embeddings[1], bond_embeddings[1]))
+            else:
                 return atom_output, bond_output
-
-            if self.atom_emb_output == 'atom':
-                return self.atom_bond_transform(to_atom=True,  # False: to bond
-                                                atomwise_input=atom_output,
-                                                bondwise_input=bond_output,
-                                                original_f_atoms=original_f_atoms,
-                                                original_f_bonds=original_f_bonds,
-                                                a2a=a2a,
-                                                a2b=a2b,
-                                                b2a=b2a,
-                                                b2revb=b2revb)
-            elif self.atom_emb_output == 'bond':
-                return self.atom_bond_transform(to_atom=False,  # False: to bond
-                                                atomwise_input=atom_output,
-                                                bondwise_input=bond_output,
-                                                original_f_atoms=original_f_atoms,
-                                                original_f_bonds=original_f_bonds,
-                                                a2a=a2a,
-                                                a2b=a2b,
-                                                b2a=b2a,
-                                                b2revb=b2revb)
-            else:  # 'both'
-                atom_embeddings = self.atom_bond_transform(to_atom=True,  # False: to bond
-                                                        atomwise_input=atom_output,
-                                                        bondwise_input=bond_output,
-                                                        original_f_atoms=original_f_atoms,
-                                                        original_f_bonds=original_f_bonds,
-                                                        a2a=a2a,
-                                                        a2b=a2b,
-                                                        b2a=b2a,
-                                                        b2revb=b2revb)
-
-                bond_embeddings = self.atom_bond_transform(to_atom=False,  # False: to bond
-                                                        atomwise_input=atom_output,
-                                                        bondwise_input=bond_output,
-                                                        original_f_atoms=original_f_atoms,
-                                                        original_f_bonds=original_f_bonds,
-                                                        a2a=a2a,
-                                                        a2b=a2b,
-                                                        b2a=b2a,
-                                                        b2revb=b2revb)
-                # Notice: need to be consistent with output format of DualMPNN encoder
-                return ((atom_embeddings[0], bond_embeddings[0]),
-                        (atom_embeddings[1], bond_embeddings[1]))
         else:
-            return atom_output, bond_output
+            if self.node_rank<4:
+                node_batch, features_batch = self.node_blocks[0](node_batch, features_batch)
+                atom_output, _, _, _, _, _, _, _ = node_batch  # atom hidden states
+                bond_output = None
+            else:
+                edge_batch, features_batch = self.edge_blocks[0](edge_batch, features_batch)
+                _, bond_output, _, _, _, _, _, _ = edge_batch  # bond hidden states
+                atom_output = None
+            if self.is_last_pipeline_stage:
+                if self.atom_emb_output is None:
+                    # output the embedding from multi-head attention directly.
+                    return atom_output, bond_output
+
+                if self.atom_emb_output == 'atom':
+                    assert True==False # not implemented
+                    # return self.atom_bond_transform(to_atom=True,  # False: to bond
+                    #                                 atomwise_input=atom_output,
+                    #                                 bondwise_input=bond_output,
+                    #                                 original_f_atoms=original_f_atoms,
+                    #                                 original_f_bonds=original_f_bonds,
+                    #                                 a2a=a2a,
+                    #                                 a2b=a2b,
+                    #                                 b2a=b2a,
+                    #                                 b2revb=b2revb)
+                elif self.atom_emb_output == 'bond':
+                    assert True==False # not implemented
+                    # return self.atom_bond_transform(to_atom=False,  # False: to bond
+                    #                                 atomwise_input=atom_output,
+                    #                                 bondwise_input=bond_output,
+                    #                                 original_f_atoms=original_f_atoms,
+                    #                                 original_f_bonds=original_f_bonds,
+                    #                                 a2a=a2a,
+                    #                                 a2b=a2b,
+                    #                                 b2a=b2a,
+                    #                                 b2revb=b2revb)
+                else:  # 'both'
+                    if self.node_rank<4:
+                        atom_in_atom_out, atom_in_bond_out = self.atom_bond_transform(to_atom=True,  # False: to bond
+                                                                atomwise_input=atom_output,
+                                                                bondwise_input=bond_output,
+                                                                original_f_atoms=original_f_atoms,
+                                                                original_f_bonds=original_f_bonds,
+                                                                a2a=a2a,
+                                                                a2b=a2b,
+                                                                b2a=b2a,
+                                                                b2revb=b2revb)
+                        bond_in_atom_out, bond_in_bond_out = None, None
+                    else:
+                        bond_in_atom_out, bond_in_bond_out = self.atom_bond_transform(to_atom=False,  # False: to bond
+                                                                atomwise_input=atom_output,
+                                                                bondwise_input=bond_output,
+                                                                original_f_atoms=original_f_atoms,
+                                                                original_f_bonds=original_f_bonds,
+                                                                a2a=a2a,
+                                                                a2b=a2b,
+                                                                b2a=b2a,
+                                                                b2revb=b2revb)
+                        atom_in_atom_out, atom_in_bond_out = None, None
+                    # Notice: need to be consistent with output format of DualMPNN encoder
+                    return ((atom_in_atom_out, atom_in_bond_out),
+                            (bond_in_atom_out, bond_in_bond_out))
+            else:
+                return atom_output, bond_output

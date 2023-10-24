@@ -309,6 +309,7 @@ def add_pretrain_args(parser: ArgumentParser):
     parser.add_argument('--micro_batch_size', type=int, default=32)
     parser.add_argument('--model_parallel_size', type=int, default=1)
     parser.add_argument('--data_parallel_size', type=int, default=1)
+    parser.add_argument('--max_pipeline', action='store_true', default=False)
 
 
 

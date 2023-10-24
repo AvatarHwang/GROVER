@@ -523,6 +523,7 @@ class GroverTask_for_pp(nn.Module):
 
         self.embedding_output_type = args.embedding_output_type
         self.node_rank = args.node_rank
+        self.args = args
 
     @staticmethod
     def get_loss_func(args: Namespace) -> Callable:
@@ -612,7 +613,7 @@ class GroverTask_for_pp(nn.Module):
 
         embeddings = self.grover(graph_batch)
 
-        if self.node_rank == 3:
+        if self.node_rank == self.args.model_parallel_size - 1:
             av_task_pred_atom = self.av_task_atom(
                 embeddings["atom_from_atom"])  # if None: means not go through this fowward
             av_task_pred_bond = self.av_task_bond(embeddings["atom_from_bond"])
@@ -642,7 +643,9 @@ class GROVEREmbedding_for_pp(nn.Module):
         """
         super(GROVEREmbedding_for_pp, self).__init__()
         self.embedding_output_type = args.embedding_output_type
-        self.is_last_pipeline_stage = args.node_rank==3
+        self.is_last_pipeline_stage = (args.model_parallel_size - 1 == args.node_rank)
+        if args.max_pipeline:
+            self.is_last_pipeline_stage = True if args.node_rank==3 or args.node_rank==7 else False
         edge_dim = get_bond_fdim() + get_atom_fdim()
         node_dim = get_atom_fdim()
         if not hasattr(args, "backbone"):

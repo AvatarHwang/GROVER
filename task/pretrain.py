@@ -232,7 +232,7 @@ def run_training(args, logger):
 
         # print information.
         if args.pipeline_parallel:
-            if args.node_rank==3:
+            if args.node_rank==args.model_parallel_size-1:
                 print('Epoch: {:04d}'.format(epoch),
                     'loss_train: {:.6f}'.format(train_loss),
                     'loss_val: {:.6f}'.format(val_loss),
