@@ -112,7 +112,7 @@ This software is released under the MIT License, with the additional requirement
 
 ### MIT License
 
-Copyright (c) 2023 Sunyeol Hwang
+Copyright (c) 2023 Sunyeol Hwang, Youngmin Yi
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
