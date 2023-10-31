@@ -1,6 +1,6 @@
 # Efficient Model Parallelism for GROVER
 
-This repository deals with model parallelism, Data+Task Model Parallelism and Task+Pipeline model parallelism for GROVER. To see what GROVER is, please refer [GROVER's original GitHub repository](https://github.com/tencent-ailab/grover).
+This repository deals with model parallelism, Data+Task Model Parallelism and Task+Pipeline model parallelism for GROVER. To see what is GROVER, please refer [GROVER's original GitHub repository](https://github.com/tencent-ailab/grover).
 
 ## Table of Contents
 
