@@ -28,7 +28,7 @@ The requirements follow the original github of GROVER: [GROVER's original GitHub
 Task model parallism for GROVER is dividing the GROVER into two sub-model, Node Encoder and Edge Encoder. To use this parallelization strategy, you'll need at least 2 GPUs. To use combined data+task parallelism, you will need at least two GPU nodes, and each node has to have more than 1 GPU. 
 
 To run Data+Task Model Parallelism, follow the steps below:
-1. Config `TaskModelParallelism/hybrid_run_inter_node.sh` and `TaskModelParallelism/hybrid_run_inter_edge.sh`
+1. Config `GROVER/hybrid_run_inter_node.sh` and `GROVER/hybrid_run_inter_edge.sh`
 ```bash
 NUM_NODES=2
 NUM_GPU_PER_NODE=(TYPE THE NUMBER OF GPU ON YOUR NODE)
@@ -60,7 +60,7 @@ $bash hybrid_run_inter_edge.sh 1
 Task+Pipeline model parallelism deals with GROVER with more GTransformer layers than the original GROVER. Adding more layers potentially has some benefits on model accuracy. Basically, this is only for Pretraining the model. This parallelization strategy divide GROVER with more layers into GROVER with one layer. 
 
 To run Task+Pipeline Model Parallelism, follow the steps below:
-1. Config `TaskModelParallelism/pretrain.sh`. 
+1. Config `GROVER/pretrain.sh`. 
 
 ```bash
 NUM_NODES=(NUMBER OF GPUs)
